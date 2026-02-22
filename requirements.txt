@@ -1,0 +1,7 @@
+streamlit
+sentence-transformers
+faiss-cpu
+pypdf
+googletrans==4.0.0rc1
+torch==2.2.2
+numpy==1.26.4
