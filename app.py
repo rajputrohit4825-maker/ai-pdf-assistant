@@ -14,18 +14,69 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
+# Custom Dark Theme
+# -------------------------------------------------
+st.markdown("""
+<style>
+body {
+    background-color: #0E1117;
+}
+
+[data-testid="stMetric"] {
+    background-color: #1E2228;
+    padding: 15px;
+    border-radius: 12px;
+    text-align: center;
+}
+
+.stButton>button {
+    background-color: #2962FF;
+    color: white;
+    border-radius: 8px;
+    height: 45px;
+    width: 100%;
+    font-weight: 600;
+}
+
+.stDownloadButton>button {
+    background-color: #00C853;
+    color: white;
+    border-radius: 8px;
+    height: 45px;
+    width: 100%;
+    font-weight: 600;
+}
+
+.block-container {
+    padding-top: 2rem;
+}
+
+footer {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
+# -------------------------------------------------
 # Sidebar
 # -------------------------------------------------
 st.sidebar.markdown("## 📄 AI PDF Assistant")
 st.sidebar.markdown("### Features")
 st.sidebar.markdown("""
 - Extract & Analyze PDFs  
+- Smart Keyword Highlight  
 - Semantic AI Search  
-- Context Aware Answers  
+- Multi Answer Retrieval  
 - Download Processed Text  
 """)
 
-st.title("📄 Professional AI PDF Assistant")
+# -------------------------------------------------
+# Header
+# -------------------------------------------------
+colA, colB = st.columns([1, 6])
+with colA:
+    st.image("https://cdn-icons-png.flaticon.com/512/337/337946.png", width=60)
+with colB:
+    st.markdown("## Professional AI PDF Assistant")
+    st.caption("AI Powered Semantic Document Intelligence")
 
 uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
 
@@ -34,7 +85,7 @@ if uploaded_file:
     # -------------------------------------------------
     # Read PDF
     # -------------------------------------------------
-    with st.spinner("Reading PDF..."):
+    with st.spinner("Analyzing document..."):
         reader = PdfReader(uploaded_file)
         text = ""
 
@@ -43,7 +94,7 @@ if uploaded_file:
             if extracted:
                 text += extracted
 
-    st.success("PDF processed successfully")
+    st.success("Document analyzed successfully. AI is ready.")
 
     # -------------------------------------------------
     # Stats Section
@@ -62,7 +113,7 @@ if uploaded_file:
     # -------------------------------------------------
     # Search & Highlight
     # -------------------------------------------------
-    st.subheader("🔍 Search Inside PDF")
+    st.subheader("🔍 Search Inside Document")
 
     search_query = st.text_input("Enter keyword to highlight")
 
@@ -81,7 +132,7 @@ if uploaded_file:
     # -------------------------------------------------
     # AI Semantic Chat
     # -------------------------------------------------
-    st.subheader("🤖 Ask AI About Your PDF")
+    st.subheader("🤖 Ask AI About Your Document")
 
     @st.cache_resource(show_spinner=False)
     def load_model():
@@ -89,7 +140,7 @@ if uploaded_file:
 
     model = load_model()
 
-    # Better paragraph chunking
+    # Paragraph based chunking
     chunks = text.split("\n")
     chunks = [c.strip() for c in chunks if len(c) > 50]
 
@@ -131,4 +182,4 @@ else:
     st.info("Upload a PDF file to get started.")
 
 st.divider()
-st.caption("Built with Python, Streamlit & Semantic AI")
+st.caption("Built with Python, Streamlit & Semantic AI | Portfolio Project")
