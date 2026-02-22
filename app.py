@@ -1,115 +1,69 @@
 import streamlit as st
-import pickle
-import faiss
-import os
-from pypdf import PdfReader
-from sentence_transformers import SentenceTransformer
-from googletrans import Translator
+from PyPDF2 import PdfReader
 
-st.set_page_config(page_title="FEEE AI Assistant", page_icon="🤖")
+st.set_page_config(
+    page_title="AI PDF Assistant",
+    page_icon="📄",
+    layout="wide"
+)
 
-translator = Translator()
+# ------------------------
+# Sidebar
+# ------------------------
 
-# ----------------------------
-# Build Vector DB From Uploaded PDF
-# ----------------------------
+st.sidebar.title("📄 AI PDF Assistant")
+st.sidebar.info(
+    """
+    Upload a PDF and:
+    - Extract text
+    - Search inside document
+    - Download extracted content
+    """
+)
 
-def build_vector_from_pdf(uploaded_file):
-    reader = PdfReader(uploaded_file)
-    text = ""
+# ------------------------
+# Main Title
+# ------------------------
 
-    for page in reader.pages:
-        text += page.extract_text() or ""
+st.title("📄 Professional PDF Assistant")
 
-    texts = text.split("\n")
+uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
 
-    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    embeddings = model.encode(texts)
+if uploaded_file:
 
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
-    index.add(embeddings)
+    with st.spinner("Reading PDF... Please wait"):
+        reader = PdfReader(uploaded_file)
+        text = ""
 
-    return model, index, texts
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted
 
-# ----------------------------
-# Session State
-# ----------------------------
+    st.success("PDF processed successfully ✅")
 
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+    col1, col2 = st.columns(2)
 
-if "model" not in st.session_state:
-    st.session_state.model = None
-    st.session_state.index = None
-    st.session_state.texts = None
+    with col1:
+        st.subheader("🔍 Search Inside PDF")
+        search_query = st.text_input("Enter keyword to search")
 
-# ----------------------------
-# Sidebar PDF Upload
-# ----------------------------
+        if search_query:
+            if search_query.lower() in text.lower():
+                st.success("Keyword found in document ✅")
+            else:
+                st.error("Keyword not found ❌")
 
-st.sidebar.title("📂 Upload PDF")
+    with col2:
+        st.subheader("📥 Download Extracted Text")
+        st.download_button(
+            label="Download as TXT",
+            data=text,
+            file_name="extracted_text.txt"
+        )
 
-uploaded_file = st.sidebar.file_uploader("Upload your PDF", type=["pdf"])
+    st.subheader("📖 Preview (First 3000 Characters)")
+    st.text_area("Extracted Content", text[:3000], height=300)
 
-if uploaded_file is not None:
-    st.sidebar.success("PDF uploaded successfully!")
-
-    model, index, texts = build_vector_from_pdf(uploaded_file)
-
-    st.session_state.model = model
-    st.session_state.index = index
-    st.session_state.texts = texts
-
-    st.sidebar.success("Vector database created!")
-
-# ----------------------------
-# Search Function
-# ----------------------------
-
-def search(query, k=3):
-    model = st.session_state.model
-    index = st.session_state.index
-    texts = st.session_state.texts
-
-    query_embedding = model.encode([query])
-    D, I = index.search(query_embedding, k)
-
-    return [texts[i] for i in I[0]]
-
-# ----------------------------
-# UI
-# ----------------------------
-
-st.title("🤖 AI PDF Assistant")
-
-if st.session_state.model is None:
-    st.info("Please upload a PDF to start chatting.")
 else:
-
-    # Show chat history
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    if prompt := st.chat_input("Ask your question..."):
-
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        detected_lang = translator.detect(prompt).lang
-        translated_query = translator.translate(prompt, dest="en").text
-
-        results = search(translated_query)
-        answer = " ".join(results)
-
-        if detected_lang == "hi":
-            final_answer = translator.translate(answer, dest="hi").text
-        else:
-            final_answer = answer
-
-        with st.chat_message("assistant"):
-            st.markdown(final_answer)
-
-        st.session_state.messages.append({"role": "assistant", "content": final_answer})
+    st.info("Upload a PDF file to get started.")
