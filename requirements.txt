@@ -1,7 +1,3 @@
 streamlit
-sentence-transformers
 pypdf
 googletrans==4.0.0rc1
-numpy
-torch
-faiss-cpu
