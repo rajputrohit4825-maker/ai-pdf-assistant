@@ -18,9 +18,7 @@ st.set_page_config(
 # -------------------------------------------------
 st.markdown("""
 <style>
-body {
-    background-color: #0E1117;
-}
+body { background-color: #0E1117; }
 
 [data-testid="stMetric"] {
     background-color: #1E2228;
@@ -47,9 +45,7 @@ body {
     font-weight: 600;
 }
 
-.block-container {
-    padding-top: 2rem;
-}
+.block-container { padding-top: 2rem; }
 
 footer {visibility: hidden;}
 </style>
@@ -61,7 +57,7 @@ footer {visibility: hidden;}
 st.sidebar.markdown("## 📄 AI PDF Assistant")
 st.sidebar.markdown("### Features")
 st.sidebar.markdown("""
-- Extract & Analyze PDFs  
+- Multi-PDF Upload  
 - Smart Keyword Highlight  
 - Semantic AI Search  
 - Multi Answer Retrieval  
@@ -75,45 +71,52 @@ colA, colB = st.columns([1, 6])
 with colA:
     st.image("https://cdn-icons-png.flaticon.com/512/337/337946.png", width=60)
 with colB:
-    st.markdown("## Professional AI PDF Assistant")
-    st.caption("AI Powered Semantic Document Intelligence")
+    st.markdown("## Professional AI PDF Knowledge Base")
+    st.caption("AI Powered Multi-Document Intelligence System")
 
-uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
+# -------------------------------------------------
+# Multi PDF Upload
+# -------------------------------------------------
+uploaded_files = st.file_uploader(
+    "Upload one or more PDF files",
+    type="pdf",
+    accept_multiple_files=True
+)
 
-if uploaded_file:
+if uploaded_files:
+
+    text = ""
+    total_pages = 0
+
+    with st.spinner("Analyzing documents..."):
+        for file in uploaded_files:
+            reader = PdfReader(file)
+            total_pages += len(reader.pages)
+
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    text += extracted
+
+    st.success("Documents analyzed successfully. AI is ready.")
 
     # -------------------------------------------------
-    # Read PDF
+    # Stats
     # -------------------------------------------------
-    with st.spinner("Analyzing document..."):
-        reader = PdfReader(uploaded_file)
-        text = ""
-
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted
-
-    st.success("Document analyzed successfully. AI is ready.")
-
-    # -------------------------------------------------
-    # Stats Section
-    # -------------------------------------------------
-    total_pages = len(reader.pages)
     total_words = len(text.split())
     total_chars = len(text)
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Pages", total_pages)
-    col2.metric("Words", total_words)
-    col3.metric("Characters", total_chars)
+    col1.metric("Total Pages", total_pages)
+    col2.metric("Total Words", total_words)
+    col3.metric("Total Characters", total_chars)
 
     st.divider()
 
     # -------------------------------------------------
     # Search & Highlight
     # -------------------------------------------------
-    st.subheader("🔍 Search Inside Document")
+    st.subheader("🔍 Search Inside Documents")
 
     search_query = st.text_input("Enter keyword to highlight")
 
@@ -132,7 +135,7 @@ if uploaded_file:
     # -------------------------------------------------
     # AI Semantic Chat
     # -------------------------------------------------
-    st.subheader("🤖 Ask AI About Your Document")
+    st.subheader("🤖 Ask AI About Your Documents")
 
     @st.cache_resource(show_spinner=False)
     def load_model():
@@ -140,7 +143,7 @@ if uploaded_file:
 
     model = load_model()
 
-    # Paragraph based chunking
+    # Paragraph chunking
     chunks = text.split("\n")
     chunks = [c.strip() for c in chunks if len(c) > 50]
 
@@ -151,7 +154,7 @@ if uploaded_file:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
 
-        user_question = st.chat_input("Ask something about your document")
+        user_question = st.chat_input("Ask something about your documents")
 
         if user_question:
             query_embedding = model.encode([user_question])
@@ -170,16 +173,16 @@ if uploaded_file:
     st.divider()
 
     # -------------------------------------------------
-    # Download Section
+    # Download
     # -------------------------------------------------
     st.download_button(
-        label="📥 Download Extracted Text",
+        label="📥 Download Combined Extracted Text",
         data=text,
-        file_name="extracted_text.txt"
+        file_name="combined_extracted_text.txt"
     )
 
 else:
-    st.info("Upload a PDF file to get started.")
+    st.info("Upload one or more PDF files to get started.")
 
 st.divider()
-st.caption("Built with Python, Streamlit & Semantic AI | Portfolio Project")
+st.caption("Built with Python, Streamlit & Semantic AI | Enterprise Portfolio Project")
