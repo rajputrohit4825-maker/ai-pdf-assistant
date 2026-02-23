@@ -1,78 +1,59 @@
 import streamlit as st
-import sqlite3
-import json
+import os
+import bcrypt
+import numpy as np
 import re
 from datetime import datetime
-from sentence_transformers import SentenceTransformer
-import numpy as np
 from PyPDF2 import PdfReader
-from passlib.context import CryptContext
+from sentence_transformers import SentenceTransformer
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime
+from sqlalchemy.orm import declarative_base, sessionmaker
 
-# ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="AI PDF Platform v2", layout="wide")
+# ---------------- CONFIG ----------------
+st.set_page_config(page_title="AI PDF Platform Pro", layout="wide")
 
-# ---------------- DATABASE ----------------
-conn = sqlite3.connect("database.db", check_same_thread=False)
-cursor = conn.cursor()
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///database.db")
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT
-)
-""")
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT,
-    content TEXT,
-    embedding TEXT,
-    created_at TEXT
-)
-""")
+# ---------------- MODELS ----------------
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT,
-    question TEXT,
-    timestamp TEXT
-)
-""")
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    username = Column(String, unique=True)
+    email = Column(String, unique=True)
+    password = Column(String)
+    role = Column(String, default="user")
 
-conn.commit()
+class DocumentChunk(Base):
+    __tablename__ = "document_chunks"
+    id = Column(Integer, primary_key=True)
+    username = Column(String)
+    content = Column(Text)
+    embedding = Column(Text)
+
+class History(Base):
+    __tablename__ = "history"
+    id = Column(Integer, primary_key=True)
+    username = Column(String)
+    question = Column(Text)
+    timestamp = Column(DateTime)
+
+Base.metadata.create_all(engine)
 
 # ---------------- SECURITY ----------------
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def hash_password(password):
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
 def verify_password(password, hashed):
-    return pwd_context.verify(password, hashed)
-
-# ---------------- AUTH ----------------
-def register_user(username, password):
-    try:
-        cursor.execute(
-            "INSERT INTO users (username, password) VALUES (?, ?)",
-            (username, hash_password(password))
-        )
-        conn.commit()
-        return True
-    except:
-        return False
-
-def login_user(username, password):
-    cursor.execute("SELECT password FROM users WHERE username=?", (username,))
-    result = cursor.fetchone()
-    if result and verify_password(password, result[0]):
-        return True
-    return False
+    return bcrypt.checkpw(password.encode(), hashed.encode())
 
 # ---------------- MODEL CACHE ----------------
+
 @st.cache_resource
 def load_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -80,132 +61,154 @@ def load_model():
 model = load_model()
 
 # ---------------- SESSION ----------------
+
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
-# ---------------- LOGIN ----------------
+# ---------------- AUTH ----------------
+
 if not st.session_state.logged_in:
 
-    st.title("🔐 Secure Login")
+    st.title("🔐 Secure Login System")
 
     menu = st.radio("Select", ["Login", "Register"])
 
     username = st.text_input("Username")
+    email = st.text_input("Email (for register)")
     password = st.text_input("Password", type="password")
+
+    db = SessionLocal()
 
     if menu == "Register":
         if st.button("Register"):
-            if register_user(username, password):
-                st.success("Account Created")
-            else:
-                st.error("Username exists")
+            try:
+                new_user = User(
+                    username=username,
+                    email=email,
+                    password=hash_password(password),
+                    role="admin" if username == "admin" else "user"
+                )
+                db.add(new_user)
+                db.commit()
+                st.success("Registered Successfully")
+            except:
+                st.error("Username or Email already exists")
 
     if menu == "Login":
         if st.button("Login"):
-            if login_user(username, password):
+            user = db.query(User).filter(User.username == username).first()
+            if user and verify_password(password, user.password):
                 st.session_state.logged_in = True
-                st.session_state.username = username
+                st.session_state.username = user.username
+                st.session_state.role = user.role
                 st.rerun()
             else:
-                st.error("Invalid credentials")
+                st.error("Invalid Credentials")
+
+    db.close()
 
 # ---------------- MAIN APP ----------------
+
 if st.session_state.logged_in:
 
     st.sidebar.success(f"Logged in as {st.session_state.username}")
+    page = st.sidebar.selectbox("Navigate", ["Chat", "History", "Admin"])
 
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.rerun()
 
-    st.title("📄 AI PDF Platform – Phase 2 Database Upgrade")
+    db = SessionLocal()
 
-    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+    # ---------------- CHAT ----------------
+    if page == "Chat":
 
-    if uploaded_file:
+        st.title("📄 Semantic PDF Chat Engine")
 
-        reader = PdfReader(uploaded_file)
-        text = ""
+        uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+        if uploaded_file:
 
-        sentences = re.split(r"[.\n।]", text)
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 30]
+            reader = PdfReader(uploaded_file)
+            text = ""
 
-        st.info("Indexing document...")
+            for page_obj in reader.pages:
+                extracted = page_obj.extract_text()
+                if extracted:
+                    text += extracted + "\n"
 
-        for sentence in sentences:
-            embedding = model.encode(sentence).tolist()
+            sentences = re.split(r"[.\n।]", text)
+            sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
 
-            cursor.execute("""
-                INSERT INTO documents (username, content, embedding, created_at)
-                VALUES (?, ?, ?, ?)
-            """, (
-                st.session_state.username,
-                sentence,
-                json.dumps(embedding),
-                str(datetime.now())
-            ))
+            st.info("Indexing document...")
 
-        conn.commit()
-        st.success("Document Indexed Successfully")
+            for chunk in sentences:
+                vector = model.encode(chunk).tolist()
+                db_chunk = DocumentChunk(
+                    username=st.session_state.username,
+                    content=chunk,
+                    embedding=str(vector)
+                )
+                db.add(db_chunk)
 
-    st.divider()
-    st.subheader("💬 Ask Question")
+            db.commit()
+            st.success("Document Indexed Successfully")
 
-    query = st.text_input("Enter your question")
+        query = st.text_input("Ask your question")
 
-    if query:
+        if query:
 
-        query_embedding = model.encode(query)
+            query_embedding = model.encode(query)
 
-        cursor.execute("""
-            SELECT content, embedding
-            FROM documents
-            WHERE username=?
-        """, (st.session_state.username,))
+            chunks = db.query(DocumentChunk).filter(
+                DocumentChunk.username == st.session_state.username
+            ).all()
 
-        records = cursor.fetchall()
+            scored = []
 
-        best_score = -1
-        best_answer = ""
+            for chunk in chunks:
+                stored_vector = np.array(eval(chunk.embedding))
+                score = np.dot(stored_vector, query_embedding)
+                scored.append((score, chunk.content))
 
-        for content, emb_text in records:
-            embedding = np.array(json.loads(emb_text))
-            score = np.dot(embedding, query_embedding)
+            scored.sort(reverse=True)
 
-            if score > best_score:
-                best_score = score
-                best_answer = content
+            answer = " ".join([s[1] for s in scored[:3]])
 
-        st.success("Best Answer:")
-        st.write(best_answer)
+            st.success("Answer")
+            st.write(answer)
 
-        cursor.execute("""
-            INSERT INTO history (username, question, timestamp)
-            VALUES (?, ?, ?)
-        """, (
-            st.session_state.username,
-            query,
-            str(datetime.now())
-        ))
+            new_history = History(
+                username=st.session_state.username,
+                question=query,
+                timestamp=datetime.now()
+            )
+            db.add(new_history)
+            db.commit()
 
-        conn.commit()
+    # ---------------- HISTORY ----------------
+    if page == "History":
 
-    # ---------------- ANALYTICS ----------------
-    st.divider()
-    st.subheader("📊 Analytics")
+        st.title("📜 Search History")
 
-    cursor.execute("SELECT COUNT(*) FROM documents WHERE username=?",
-                   (st.session_state.username,))
-    doc_count = cursor.fetchone()[0]
+        records = db.query(History).filter(
+            History.username == st.session_state.username
+        ).order_by(History.id.desc()).all()
 
-    cursor.execute("SELECT COUNT(*) FROM history WHERE username=?",
-                   (st.session_state.username,))
-    query_count = cursor.fetchone()[0]
+        for record in records:
+            st.write(f"{record.timestamp} - {record.question}")
 
-    st.metric("Indexed Chunks", doc_count)
-    st.metric("Total Queries", query_count)
+    # ---------------- ADMIN DASHBOARD ----------------
+    if page == "Admin" and st.session_state.role == "admin":
+
+        st.title("📊 Admin Dashboard")
+
+        total_users = db.query(User).count()
+        total_docs = db.query(DocumentChunk).count()
+        total_queries = db.query(History).count()
+
+        st.metric("Total Users", total_users)
+        st.metric("Total Documents Indexed", total_docs)
+        st.metric("Total Queries", total_queries)
+
+    db.close()
