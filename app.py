@@ -18,32 +18,38 @@ if uploaded_file:
     text = ""
 
     for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted
+        try:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        except:
+            pass
 
     st.success("PDF processed successfully ✅")
 
-    st.subheader("📖 Preview")
-    st.text_area("Extracted Text", text[:2000], height=200)
+    # 🔎 Debug: Show text length
+    st.write("Text Length:", len(text))
 
-    # ---------------- AI CHAT SECTION ----------------
-    st.divider()
-    st.subheader("💬 Ask AI About This PDF")
+    if len(text.strip()) == 0:
+        st.error("This PDF appears to be scanned or image-based. Text extraction failed.")
+    else:
+        st.subheader("📖 Preview")
+        st.text_area("Extracted Text", text[:2000], height=200)
 
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+        # ---------------- AI CHAT SECTION ----------------
+        st.divider()
+        st.subheader("💬 Ask AI About This PDF")
 
-    user_question = st.text_input("Ask a question from this document")
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
 
-    if st.button("Ask AI") and user_question:
+        user_question = st.text_input("Ask a question from this document")
 
-        chunks = text.split(". ")
-        chunks = [c.strip() for c in chunks if len(c) > 5]
+        if st.button("Ask AI") and user_question:
 
-        if len(chunks) == 0:
-            st.error("No readable text found in document.")
-        else:
+            chunks = text.split(". ")
+            chunks = [c.strip() for c in chunks if len(c) > 5]
+
             model = SentenceTransformer("all-MiniLM-L6-v2")
             embeddings = model.encode(chunks)
 
@@ -66,5 +72,8 @@ if uploaded_file:
             st.session_state.chat_history.append(("You", user_question))
             st.session_state.chat_history.append(("AI", answer))
 
-    for role, message in st.session_state.chat_history:
-        st.markdown(f"**{role}:** {message}")
+        for role, message in st.session_state.chat_history:
+            st.markdown(f"**{role}:** {message}")
+
+else:
+    st.info("Upload a PDF file to get started.")
