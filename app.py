@@ -6,11 +6,11 @@ from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import re
+import pandas as pd
 
-# ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="AI PDF Platform", layout="wide")
+st.set_page_config(page_title="AI PDF Intelligence Platform", layout="wide")
 
-# ---------------- DATABASE SETUP ----------------
+# ---------------- DATABASE ----------------
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -18,7 +18,8 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
-    password TEXT
+    password TEXT,
+    role TEXT
 )
 """)
 
@@ -27,29 +28,29 @@ CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT,
     question TEXT,
-    answer TEXT,
     timestamp TEXT
 )
 """)
 
 conn.commit()
 
-# ---------------- PASSWORD HASH ----------------
+# ---------------- HASH ----------------
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-# ---------------- AUTH SYSTEM ----------------
+# ---------------- AUTH ----------------
 def register_user(username, password):
     try:
-        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)",
-                       (username, hash_password(password)))
+        role = "admin" if username == "admin" else "user"
+        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                       (username, hash_password(password), role))
         conn.commit()
         return True
     except:
         return False
 
 def login_user(username, password):
-    cursor.execute("SELECT * FROM users WHERE username=? AND password=?",
+    cursor.execute("SELECT role FROM users WHERE username=? AND password=?",
                    (username, hash_password(password)))
     return cursor.fetchone()
 
@@ -57,12 +58,12 @@ def login_user(username, password):
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
-# ---------------- LOGIN PAGE ----------------
+# ---------------- LOGIN ----------------
 if not st.session_state.logged_in:
 
-    st.title("🔐 Login System")
+    st.title("🔐 Secure Login System")
 
-    menu = st.radio("Select", ["Login", "Register"])
+    menu = st.radio("Select Option", ["Login", "Register"])
 
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
@@ -70,90 +71,115 @@ if not st.session_state.logged_in:
     if menu == "Register":
         if st.button("Register"):
             if register_user(username, password):
-                st.success("Registered Successfully")
+                st.success("Account Created Successfully")
             else:
                 st.error("Username already exists")
 
     if menu == "Login":
         if st.button("Login"):
-            if login_user(username, password):
+            result = login_user(username, password)
+            if result:
                 st.session_state.logged_in = True
                 st.session_state.username = username
-                st.success("Login Successful")
+                st.session_state.role = result[0]
                 st.rerun()
             else:
-                st.error("Invalid credentials")
+                st.error("Invalid Credentials")
 
 # ---------------- MAIN APP ----------------
 if st.session_state.logged_in:
 
     st.sidebar.success(f"Logged in as {st.session_state.username}")
 
+    page = st.sidebar.selectbox("Navigate", ["Chat", "History", "Analytics"])
+
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.rerun()
 
-    st.title("📄 AI PDF Intelligence Platform")
+    # ---------------- LOAD MODEL ONCE ----------------
+    @st.cache_resource
+    def load_model():
+        return SentenceTransformer("all-MiniLM-L6-v2")
 
-    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+    model = load_model()
 
-    if uploaded_file:
+    # ---------------- CHAT PAGE ----------------
+    if page == "Chat":
 
-        reader = PdfReader(uploaded_file)
-        text = ""
+        st.title("📄 AI Semantic PDF Chat")
 
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+        uploaded_files = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True)
 
-        if not text.strip():
-            st.error("No readable text found.")
-            st.stop()
+        if uploaded_files:
 
-        sentences = re.split(r"[.\n।]", text)
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+            all_sentences = []
 
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        embeddings = model.encode(sentences)
+            for file in uploaded_files:
+                reader = PdfReader(file)
+                text = ""
 
-        st.subheader("💬 Ask Question")
-        query = st.text_input("Type your question")
+                for page in reader.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        text += extracted + "\n"
 
-        if query:
+                sentences = re.split(r"[.\n।]", text)
+                sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+                all_sentences.extend(sentences)
 
-            query_embedding = model.encode([query])
-            similarities = np.dot(embeddings, query_embedding.T).flatten()
-            top_indices = similarities.argsort()[-3:][::-1]
+            embeddings = model.encode(all_sentences)
 
-            context = " ".join([sentences[i] for i in top_indices])
-            answer = context
+            query = st.text_input("Ask your question")
 
-            st.success("Answer:")
-            st.write(answer)
+            if query:
 
-            # Save history
-            cursor.execute("INSERT INTO history (username, question, answer, timestamp) VALUES (?, ?, ?, ?)",
-                           (st.session_state.username, query, answer, str(datetime.now())))
-            conn.commit()
+                query_embedding = model.encode([query])
+                similarities = np.dot(embeddings, query_embedding.T).flatten()
+                top_indices = similarities.argsort()[-3:][::-1]
 
-    # ---------------- HISTORY ----------------
-    st.divider()
-    st.subheader("📜 Your Search History")
+                answer = " ".join([all_sentences[i] for i in top_indices])
 
-    cursor.execute("SELECT question, timestamp FROM history WHERE username=? ORDER BY id DESC",
-                   (st.session_state.username,))
-    records = cursor.fetchall()
+                st.success("Answer:")
+                st.write(answer)
 
-    for record in records:
-        st.write(f"🕒 {record[1]} - {record[0]}")
+                cursor.execute("INSERT INTO history (username, question, timestamp) VALUES (?, ?, ?)",
+                               (st.session_state.username, query, str(datetime.now())))
+                conn.commit()
 
-    # ---------------- ANALYTICS ----------------
-    st.divider()
-    st.subheader("📊 Analytics Dashboard")
+    # ---------------- HISTORY PAGE ----------------
+    if page == "History":
 
-    cursor.execute("SELECT COUNT(*) FROM history WHERE username=?",
-                   (st.session_state.username,))
-    total_queries = cursor.fetchone()[0]
+        st.title("📜 Search History")
 
-    st.metric("Total Queries", total_queries)
+        if st.session_state.role == "admin":
+            cursor.execute("SELECT username, question, timestamp FROM history ORDER BY id DESC")
+        else:
+            cursor.execute("SELECT username, question, timestamp FROM history WHERE username=? ORDER BY id DESC",
+                           (st.session_state.username,))
+
+        data = cursor.fetchall()
+
+        df = pd.DataFrame(data, columns=["User", "Question", "Time"])
+        st.dataframe(df)
+
+    # ---------------- ANALYTICS PAGE ----------------
+    if page == "Analytics":
+
+        st.title("📊 Analytics Dashboard")
+
+        cursor.execute("SELECT COUNT(*) FROM history")
+        total_queries = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_users = cursor.fetchone()[0]
+
+        st.metric("Total Users", total_users)
+        st.metric("Total Queries", total_queries)
+
+        cursor.execute("SELECT username, COUNT(*) as count FROM history GROUP BY username")
+        data = cursor.fetchall()
+
+        if data:
+            df = pd.DataFrame(data, columns=["User", "Queries"])
+            st.bar_chart(df.set_index("User"))
