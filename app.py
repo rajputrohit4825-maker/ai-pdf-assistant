@@ -4,13 +4,16 @@ import hashlib
 from datetime import datetime
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 import re
 
-# ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="AI PDF Platform", layout="wide")
+# ---------------- CONFIG ----------------
+st.set_page_config(page_title="AI Document Intelligence", layout="wide")
 
-# ---------------- DATABASE SETUP ----------------
+# ---------------- DATABASE ----------------
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -18,7 +21,8 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
-    password TEXT
+    password TEXT,
+    role TEXT
 )
 """)
 
@@ -34,15 +38,22 @@ CREATE TABLE IF NOT EXISTS history (
 
 conn.commit()
 
-# ---------------- PASSWORD HASH ----------------
+# ---------------- HASH ----------------
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-# ---------------- AUTH SYSTEM ----------------
-def register_user(username, password):
+# ---------------- MODEL LOAD (FAST) ----------------
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+model = load_model()
+
+# ---------------- AUTH ----------------
+def register_user(username, password, role="user"):
     try:
-        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)",
-                       (username, hash_password(password)))
+        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+                       (username, hash_password(password), role))
         conn.commit()
         return True
     except:
@@ -60,7 +71,7 @@ if "logged_in" not in st.session_state:
 # ---------------- LOGIN PAGE ----------------
 if not st.session_state.logged_in:
 
-    st.title("🔐 Login System")
+    st.title("🔐 AI Platform Login")
 
     menu = st.radio("Select", ["Login", "Register"])
 
@@ -72,14 +83,15 @@ if not st.session_state.logged_in:
             if register_user(username, password):
                 st.success("Registered Successfully")
             else:
-                st.error("Username already exists")
+                st.error("Username exists")
 
     if menu == "Login":
         if st.button("Login"):
-            if login_user(username, password):
+            user = login_user(username, password)
+            if user:
                 st.session_state.logged_in = True
-                st.session_state.username = username
-                st.success("Login Successful")
+                st.session_state.username = user[1]
+                st.session_state.role = user[3]
                 st.rerun()
             else:
                 st.error("Invalid credentials")
@@ -87,35 +99,38 @@ if not st.session_state.logged_in:
 # ---------------- MAIN APP ----------------
 if st.session_state.logged_in:
 
-    st.sidebar.success(f"Logged in as {st.session_state.username}")
+    st.sidebar.success(f"User: {st.session_state.username}")
+    st.sidebar.write(f"Role: {st.session_state.role}")
 
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.rerun()
 
-    st.title("📄 AI PDF Intelligence Platform")
+    st.title("📄 AI Document Intelligence Platform")
 
-    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+    uploaded_files = st.file_uploader("Upload PDF(s)", type="pdf", accept_multiple_files=True)
 
-    if uploaded_file:
+    if uploaded_files:
 
-        reader = PdfReader(uploaded_file)
-        text = ""
+        full_text = ""
 
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
+        for file in uploaded_files:
+            reader = PdfReader(file)
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    full_text += extracted + "\n"
 
-        if not text.strip():
+        if not full_text.strip():
             st.error("No readable text found.")
             st.stop()
 
-        sentences = re.split(r"[.\n।]", text)
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+        sentences = re.split(r"[.\n।]", full_text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 25]
 
-        model = SentenceTransformer("all-MiniLM-L6-v2")
-        embeddings = model.encode(sentences)
+        if "embeddings" not in st.session_state:
+            st.session_state.embeddings = model.encode(sentences)
+            st.session_state.sentences = sentences
 
         st.subheader("💬 Ask Question")
         query = st.text_input("Type your question")
@@ -123,37 +138,52 @@ if st.session_state.logged_in:
         if query:
 
             query_embedding = model.encode([query])
-            similarities = np.dot(embeddings, query_embedding.T).flatten()
+            similarities = cosine_similarity(query_embedding, st.session_state.embeddings)[0]
             top_indices = similarities.argsort()[-3:][::-1]
 
-            context = " ".join([sentences[i] for i in top_indices])
-            answer = context
+            context = " ".join([st.session_state.sentences[i] for i in top_indices])
 
-            st.success("Answer:")
-            st.write(answer)
+            st.markdown("### 🤖 Answer")
+            st.write(context)
 
-            # Save history
             cursor.execute("INSERT INTO history (username, question, answer, timestamp) VALUES (?, ?, ?, ?)",
-                           (st.session_state.username, query, answer, str(datetime.now())))
+                           (st.session_state.username, query, context, str(datetime.now())))
             conn.commit()
 
-    # ---------------- HISTORY ----------------
+            st.download_button("Export Answer", context, "answer.txt")
+
+    # ---------------- USER HISTORY ----------------
     st.divider()
-    st.subheader("📜 Your Search History")
+    st.subheader("📜 Your History")
 
-    cursor.execute("SELECT question, timestamp FROM history WHERE username=? ORDER BY id DESC",
-                   (st.session_state.username,))
-    records = cursor.fetchall()
+    df = pd.read_sql_query(
+        f"SELECT question, timestamp FROM history WHERE username='{st.session_state.username}' ORDER BY id DESC",
+        conn
+    )
 
-    for record in records:
-        st.write(f"🕒 {record[1]} - {record[0]}")
+    if not df.empty:
+        st.dataframe(df)
 
     # ---------------- ANALYTICS ----------------
     st.divider()
-    st.subheader("📊 Analytics Dashboard")
+    st.subheader("📊 Analytics")
 
-    cursor.execute("SELECT COUNT(*) FROM history WHERE username=?",
-                   (st.session_state.username,))
-    total_queries = cursor.fetchone()[0]
-
+    total_queries = df.shape[0]
     st.metric("Total Queries", total_queries)
+
+    if total_queries > 0:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df["date"] = df["timestamp"].dt.date
+        chart = df.groupby("date").size()
+        st.line_chart(chart)
+
+    # ---------------- ADMIN DASHBOARD ----------------
+    if st.session_state.role == "admin":
+        st.divider()
+        st.subheader("🛠 Admin Dashboard")
+
+        total_users = pd.read_sql_query("SELECT COUNT(*) as count FROM users", conn)
+        total_history = pd.read_sql_query("SELECT COUNT(*) as count FROM history", conn)
+
+        st.metric("Total Users", total_users["count"][0])
+        st.metric("Total Queries (All Users)", total_history["count"][0])
