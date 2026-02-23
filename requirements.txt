@@ -8,3 +8,5 @@ openai
 matplotlib
 pandas
 scikit-learn
+bcrypt
+
