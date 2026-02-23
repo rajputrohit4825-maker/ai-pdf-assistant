@@ -3,3 +3,4 @@ PyPDF2
 sentence-transformers
 torch
 numpy
+fpdf
