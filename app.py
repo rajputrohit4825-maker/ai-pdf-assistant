@@ -1,188 +1,123 @@
 import streamlit as st
-import sqlite3
-import json
-import re
-import threading
-from datetime import datetime
-from sentence_transformers import SentenceTransformer
-import numpy as np
 from PyPDF2 import PdfReader
-from passlib.context import CryptContext
+from sentence_transformers import SentenceTransformer
+from openai import OpenAI
+import numpy as np
+from sqlalchemy import create_engine, text
+from datetime import datetime
 
-st.set_page_config(page_title="AI PDF Platform v3", layout="wide")
+# -----------------------------
+# PAGE CONFIG
+# -----------------------------
+st.set_page_config(page_title="AI PDF Platform", layout="wide")
 
-# ---------------- DATABASE ----------------
-conn = sqlite3.connect("database.db", check_same_thread=False)
-cursor = conn.cursor()
+st.title("📄 AI PDF Platform (PostgreSQL + Vector Ready)")
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT
-)
-""")
+# -----------------------------
+# DATABASE CONNECTION
+# -----------------------------
+DATABASE_URL = st.secrets["DATABASE_URL"]
+engine = create_engine(DATABASE_URL)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT,
-    content TEXT,
-    embedding_vector TEXT,
-    created_at TEXT
-)
-""")
+# Connection Test
+try:
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    st.success("Database Connected Successfully ✅")
+except Exception as e:
+    st.error(f"Database Connection Failed: {e}")
 
-cursor.execute("""
-CREATE INDEX IF NOT EXISTS idx_user ON documents(username)
-""")
+# -----------------------------
+# USER SESSION
+# -----------------------------
+if "username" not in st.session_state:
+    st.session_state.username = "demo_user"
 
-conn.commit()
-
-# ---------------- SECURITY ----------------
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def hash_password(password):
-    return pwd_context.hash(password)
-
-def verify_password(password, hashed):
-    return pwd_context.verify(password, hashed)
-
-# ---------------- AUTH ----------------
-def register_user(username, password):
-    try:
-        cursor.execute(
-            "INSERT INTO users (username, password) VALUES (?, ?)",
-            (username, hash_password(password))
-        )
-        conn.commit()
-        return True
-    except:
-        return False
-
-def login_user(username, password):
-    cursor.execute("SELECT password FROM users WHERE username=?", (username,))
-    result = cursor.fetchone()
-    if result and verify_password(password, result[0]):
-        return True
-    return False
-
-# ---------------- MODEL CACHE ----------------
+# -----------------------------
+# LOAD EMBEDDING MODEL (cached)
+# -----------------------------
 @st.cache_resource
 def load_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 model = load_model()
 
-# ---------------- ASYNC INDEXING ----------------
-def index_document(username, sentences):
-    for sentence in sentences:
-        embedding = model.encode(sentence).tolist()
+# -----------------------------
+# PDF UPLOAD
+# -----------------------------
+uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
 
-        cursor.execute("""
-            INSERT INTO documents (username, content, embedding_vector, created_at)
-            VALUES (?, ?, ?, ?)
-        """, (
-            username,
-            sentence,
-            json.dumps(embedding),
-            str(datetime.now())
-        ))
+if uploaded_file:
 
-    conn.commit()
+    reader = PdfReader(uploaded_file)
+    text_content = ""
 
-# ---------------- SESSION ----------------
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+    for page in reader.pages:
+        extracted = page.extract_text()
+        if extracted:
+            text_content += extracted
 
-# ---------------- LOGIN ----------------
-if not st.session_state.logged_in:
+    if not text_content.strip():
+        st.error("No readable text found in PDF ❌")
+    else:
+        st.success("PDF processed successfully ✅")
 
-    st.title("🔐 Secure Login")
+        # Split into chunks
+        sentences = text_content.split(". ")
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 50]
 
-    menu = st.radio("Select", ["Login", "Register"])
+        if st.button("Index Document to Database"):
+            with engine.begin() as conn:
+                for sentence in sentences:
+                    embedding = model.encode(sentence).tolist()
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+                    conn.execute(
+                        text("""
+                            INSERT INTO documents (username, content, embedding_vector, created_at)
+                            VALUES (:username, :content, :embedding, :created_at)
+                        """),
+                        {
+                            "username": st.session_state.username,
+                            "content": sentence,
+                            "embedding": embedding,
+                            "created_at": datetime.utcnow()
+                        }
+                    )
 
-    if menu == "Register":
-        if st.button("Register"):
-            if register_user(username, password):
-                st.success("Account Created")
-            else:
-                st.error("Username exists")
+            st.success("Document Indexed in PostgreSQL ✅")
 
-    if menu == "Login":
-        if st.button("Login"):
-            if login_user(username, password):
-                st.session_state.logged_in = True
-                st.session_state.username = username
-                st.rerun()
-            else:
-                st.error("Invalid credentials")
+# -----------------------------
+# SEARCH SECTION
+# -----------------------------
+st.divider()
+st.subheader("🔎 Ask a Question")
 
-# ---------------- MAIN APP ----------------
-if st.session_state.logged_in:
+query = st.text_input("Enter your question")
 
-    st.sidebar.success(f"Logged in as {st.session_state.username}")
+if st.button("Search") and query:
 
-    if st.sidebar.button("Logout"):
-        st.session_state.logged_in = False
-        st.rerun()
+    query_vector = model.encode(query).tolist()
 
-    st.title("📄 AI PDF Platform – Phase 3 Vector Upgrade")
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("""
+                SELECT content
+                FROM documents
+                WHERE username = :username
+                ORDER BY embedding_vector <-> :query_vector
+                LIMIT 3
+            """),
+            {
+                "username": st.session_state.username,
+                "query_vector": query_vector
+            }
+        )
 
-    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+        matches = result.fetchall()
 
-    if uploaded_file:
-
-        reader = PdfReader(uploaded_file)
-        text = ""
-
-        for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text += extracted + "\n"
-
-        sentences = re.split(r"[.\n।]", text)
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 40]
-
-        st.info("Indexing in background...")
-
-        threading.Thread(
-            target=index_document,
-            args=(st.session_state.username, sentences)
-        ).start()
-
-        st.success("Document indexing started (async)")
-
-    st.divider()
-    st.subheader("💬 Semantic Search")
-
-    query = st.text_input("Ask your question")
-
-    if query:
-
-        query_embedding = model.encode(query)
-
-        cursor.execute("""
-            SELECT content, embedding_vector
-            FROM documents
-            WHERE username=?
-        """, (st.session_state.username,))
-
-        records = cursor.fetchall()
-
-        best_score = -1
-        best_answer = ""
-
-        for content, emb_text in records:
-            embedding = np.array(json.loads(emb_text))
-            score = np.dot(embedding, query_embedding)
-
-            if score > best_score:
-                best_score = score
-                best_answer = content
-
-        st.success("Best Match:")
-        st.write(best_answer)
+    if matches:
+        st.success("Top Relevant Results:")
+        for row in matches:
+            st.write("•", row[0])
+    else:
+        st.warning("No relevant answer found.")
