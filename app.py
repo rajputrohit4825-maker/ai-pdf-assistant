@@ -1,36 +1,4 @@
-import streamlit as st
-from PyPDF2 import PdfReader
-from sentence_transformers import SentenceTransformer
-from openai import OpenAI
-import numpy as np
-
-# Load OpenAI client
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
-st.set_page_config(page_title="AI PDF Assistant", layout="wide")
-
-st.title("📄 Professional AI PDF Assistant")
-
-uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
-
-if uploaded_file:
-
-    # Extract text from PDF
-    reader = PdfReader(uploaded_file)
-    text = ""
-
-    for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted
-
-    st.success("PDF processed successfully ✅")
-
-    # Preview Section
-    st.subheader("📖 Preview")
-    st.text_area("Extracted Content", text[:3000], height=250)
-
-    # ---------------- AI CHAT SECTION ----------------
+# ---------------- AI CHAT SECTION ----------------
     st.divider()
     st.subheader("💬 Ask AI About This PDF")
 
@@ -41,24 +9,22 @@ if uploaded_file:
 
     if st.button("Ask AI") and user_question:
 
+        # Split into chunks (no strict filtering)
         chunks = text.split(". ")
-        chunks = [c.strip() for c in chunks if len(c) > 40]
+        chunks = [c.strip() for c in chunks if len(c) > 5]
 
         if len(chunks) == 0:
-            st.error("Document too small for AI processing.")
+            st.error("No readable text found in document.")
         else:
-            # Load embedding model
             model = SentenceTransformer("all-MiniLM-L6-v2")
             embeddings = model.encode(chunks)
 
-            # Encode question
             query_embedding = model.encode([user_question])
             similarities = np.dot(embeddings, query_embedding.T).flatten()
 
             top_indices = similarities.argsort()[-3:][::-1]
             context = "\n\n".join([chunks[i] for i in top_indices])
 
-            # GPT Call
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -74,7 +40,4 @@ if uploaded_file:
 
     # Display chat history
     for role, message in st.session_state.chat_history:
-        st.markdown(f"**{role}:** {message}")
-
-else:
-    st.info("Upload a PDF file to get started.")
+        st.markdown(f"**{role}:** {message}")]
