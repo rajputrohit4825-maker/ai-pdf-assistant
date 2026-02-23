@@ -5,3 +5,6 @@ torch
 numpy
 fpdf
 openai
+matplotlib
+pandas
+scikit-learn
