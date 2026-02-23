@@ -1,62 +1,159 @@
 import streamlit as st
+import sqlite3
+import hashlib
+from datetime import datetime
 from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer
+import numpy as np
 import re
 
-# ---------------- Page Config ----------------
-st.set_page_config(page_title="AI PDF Assistant", layout="wide")
+# ---------------- PAGE CONFIG ----------------
+st.set_page_config(page_title="AI PDF Platform", layout="wide")
 
-st.title("📄 AI PDF Assistant")
-st.caption("Fast Search • Hindi + English Support")
+# ---------------- DATABASE SETUP ----------------
+conn = sqlite3.connect("database.db", check_same_thread=False)
+cursor = conn.cursor()
 
-uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password TEXT
+)
+""")
 
-# ---------------- PDF Processing ----------------
-if uploaded_file:
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    question TEXT,
+    answer TEXT,
+    timestamp TEXT
+)
+""")
 
-    reader = PdfReader(uploaded_file)
-    text = ""
+conn.commit()
 
-    for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted + "\n"
+# ---------------- PASSWORD HASH ----------------
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
-    if not text.strip():
-        st.error("No readable text found in this PDF.")
-        st.stop()
+# ---------------- AUTH SYSTEM ----------------
+def register_user(username, password):
+    try:
+        cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)",
+                       (username, hash_password(password)))
+        conn.commit()
+        return True
+    except:
+        return False
 
-    st.success("PDF processed successfully ✅")
+def login_user(username, password):
+    cursor.execute("SELECT * FROM users WHERE username=? AND password=?",
+                   (username, hash_password(password)))
+    return cursor.fetchone()
 
-    # Split sentences (Hindi + English)
-    sentences = re.split(r"[.\n।]", text)
-    sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+# ---------------- SESSION ----------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
 
+# ---------------- LOGIN PAGE ----------------
+if not st.session_state.logged_in:
+
+    st.title("🔐 Login System")
+
+    menu = st.radio("Select", ["Login", "Register"])
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if menu == "Register":
+        if st.button("Register"):
+            if register_user(username, password):
+                st.success("Registered Successfully")
+            else:
+                st.error("Username already exists")
+
+    if menu == "Login":
+        if st.button("Login"):
+            if login_user(username, password):
+                st.session_state.logged_in = True
+                st.session_state.username = username
+                st.success("Login Successful")
+                st.rerun()
+            else:
+                st.error("Invalid credentials")
+
+# ---------------- MAIN APP ----------------
+if st.session_state.logged_in:
+
+    st.sidebar.success(f"Logged in as {st.session_state.username}")
+
+    if st.sidebar.button("Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
+
+    st.title("📄 AI PDF Intelligence Platform")
+
+    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+
+    if uploaded_file:
+
+        reader = PdfReader(uploaded_file)
+        text = ""
+
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+
+        if not text.strip():
+            st.error("No readable text found.")
+            st.stop()
+
+        sentences = re.split(r"[.\n।]", text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 20]
+
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        embeddings = model.encode(sentences)
+
+        st.subheader("💬 Ask Question")
+        query = st.text_input("Type your question")
+
+        if query:
+
+            query_embedding = model.encode([query])
+            similarities = np.dot(embeddings, query_embedding.T).flatten()
+            top_indices = similarities.argsort()[-3:][::-1]
+
+            context = " ".join([sentences[i] for i in top_indices])
+            answer = context
+
+            st.success("Answer:")
+            st.write(answer)
+
+            # Save history
+            cursor.execute("INSERT INTO history (username, question, answer, timestamp) VALUES (?, ?, ?, ?)",
+                           (st.session_state.username, query, answer, str(datetime.now())))
+            conn.commit()
+
+    # ---------------- HISTORY ----------------
     st.divider()
-    st.subheader("🔎 Search in Document")
+    st.subheader("📜 Your Search History")
 
-    query = st.text_input("Type your question")
+    cursor.execute("SELECT question, timestamp FROM history WHERE username=? ORDER BY id DESC",
+                   (st.session_state.username,))
+    records = cursor.fetchall()
 
-    if query:
+    for record in records:
+        st.write(f"🕒 {record[1]} - {record[0]}")
 
-        query_lower = query.lower()
-        results = []
+    # ---------------- ANALYTICS ----------------
+    st.divider()
+    st.subheader("📊 Analytics Dashboard")
 
-        for sentence in sentences:
-            if query_lower in sentence.lower():
-                results.append(sentence)
+    cursor.execute("SELECT COUNT(*) FROM history WHERE username=?",
+                   (st.session_state.username,))
+    total_queries = cursor.fetchone()[0]
 
-        if results:
-            st.markdown(f"### Found {len(results)} Results")
-            for result in results[:5]:
-                highlighted = re.sub(
-                    query,
-                    f"**{query}**",
-                    result,
-                    flags=re.IGNORECASE
-                )
-                st.write("•", highlighted)
-        else:
-            st.warning("No exact match found. Try different keywords.")
-
-else:
-    st.info("Upload a PDF to start.")
+    st.metric("Total Queries", total_queries)
