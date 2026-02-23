@@ -1,5 +1,11 @@
-# ---------------- AI CHAT SECTION ----------------
-    st.divider()
+import streamlit as st
+from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer
+from openai import OpenAI
+import numpy as np
+
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+   st.divider()
     st.subheader("💬 Ask AI About This PDF")
 
     if "chat_history" not in st.session_state:
@@ -41,3 +47,4 @@
     # Display chat history
     for role, message in st.session_state.chat_history:
         st.markdown(f"**{role}:** {message}")]
+
