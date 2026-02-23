@@ -187,3 +187,4 @@ if st.session_state.logged_in:
 
         st.metric("Total Users", total_users["count"][0])
         st.metric("Total Queries (All Users)", total_history["count"][0])
+
