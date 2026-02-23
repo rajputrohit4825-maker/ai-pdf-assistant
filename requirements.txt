@@ -9,8 +9,9 @@ matplotlib
 pandas
 scikit-learn
 bcrypt
-psycopg-binary
 sqlalchemy
 passlib[bcrypt]
+psycopg2-binary
+
 
 
