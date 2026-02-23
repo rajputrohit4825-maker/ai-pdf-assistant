@@ -1,15 +1,13 @@
-import streamlit as st
+ import streamlit as st
 from PyPDF2 import PdfReader
 import re
 
-# ---------------- PAGE CONFIG ----------------
 st.set_page_config(page_title="Pro AI PDF Assistant", layout="wide")
 
-# ---------------- DARK MODE STYLE ----------------
+# ---------------- DARK STYLE ----------------
 st.markdown("""
 <style>
 body { background-color: #0E1117; color: white; }
-.block-container { padding-top: 2rem; }
 .chat-box {
     padding: 12px;
     border-radius: 12px;
@@ -22,20 +20,11 @@ mark {
     padding: 2px 4px;
     border-radius: 4px;
 }
-.header {
-    font-size:28px;
-    font-weight:bold;
-}
-.subheader {
-    font-size:16px;
-    color:gray;
-}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------- HEADER ----------------
-st.markdown("<div class='header'>📄 Pro AI PDF Assistant</div>", unsafe_allow_html=True)
-st.markdown("<div class='subheader'>Live Search • Highlighted Results • Professional UI</div>", unsafe_allow_html=True)
+st.title("📄 Pro AI PDF Assistant")
+st.caption("Live Search • Highlighted Results • Hindi + English")
 
 # ---------------- SIDEBAR ----------------
 st.sidebar.title("⚙ Settings")
@@ -50,45 +39,64 @@ if uploaded_file:
     if "sentences_data" not in st.session_state:
 
         reader = PdfReader(uploaded_file)
-        text = ""
         page_map = []
 
         for page_number, page in enumerate(reader.pages, start=1):
             extracted = page.extract_text()
             if extracted:
-                text += extracted + "\n"
-
                 split_sentences = re.split(r"[.\n।]", extracted)
                 for sentence in split_sentences:
                     clean = sentence.strip()
                     if len(clean) > min_length:
                         page_map.append((clean, clean.lower(), page_number))
 
-        if len(text.strip()) == 0:
-            st.error("This PDF appears to be scanned or image-based.")
+        if not page_map:
+            st.error("This PDF appears to be scanned or unreadable.")
             st.stop()
 
         st.session_state.sentences_data = page_map
-        st.session_state.full_text = text
-
         st.success("PDF processed successfully ✅")
 
     sentences_data = st.session_state.sentences_data
 
     st.divider()
-    st.subheader("💬 Live Question Search")
+    st.subheader("💬 Live Smart Search")
 
-    user_question = st.text_input("Type your question (results appear instantly)")
+    user_question = st.text_input("Type your question (Hindi or English)")
 
     if user_question:
 
-        question_words = user_question.lower().split()
+        # -------- STOP WORDS --------
+        stop_words = {
+            "what","is","the","a","an","of","in","to","and",
+            "क्या","है","और","का","की","के","को","में"
+        }
+
+        question_words = [
+            word for word in user_question.lower().split()
+            if word not in stop_words and len(word) > 2
+        ]
+
         results = []
 
         for original, lower_version, page_number in sentences_data:
-            score = sum(word in lower_version for word in question_words)
+
+            score = 0
+
+            for word in question_words:
+                if word in lower_version:
+                    score += 2
+                elif any(word in w for w in lower_version.split()):
+                    score += 1
+
             if score > 0:
                 results.append((score, original, page_number))
+
+        # If still nothing matched, fallback to loose match
+        if not results:
+            for original, lower_version, page_number in sentences_data:
+                if any(word in lower_version for word in question_words):
+                    results.append((1, original, page_number))
 
         if results:
             results.sort(reverse=True)
@@ -113,7 +121,6 @@ if uploaded_file:
 
                 export_text += f"Page {page_number}: {sentence}\n\n"
 
-            # -------- EXPORT BUTTON --------
             st.download_button(
                 label="📥 Export Results",
                 data=export_text,
@@ -122,7 +129,7 @@ if uploaded_file:
             )
 
         else:
-            st.warning("No relevant answer found.")
+            st.warning("No relevant answer found in this document.")
 
 else:
     st.info("Upload a PDF file to get started.")
