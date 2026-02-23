@@ -14,7 +14,7 @@ st.set_page_config(
 )
 
 # -------------------------------------------------
-# Custom Dark Theme
+# Dark Theme Styling
 # -------------------------------------------------
 st.markdown("""
 <style>
@@ -46,7 +46,6 @@ body { background-color: #0E1117; }
 }
 
 .block-container { padding-top: 2rem; }
-
 footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
@@ -55,13 +54,13 @@ footer {visibility: hidden;}
 # Sidebar
 # -------------------------------------------------
 st.sidebar.markdown("## 📄 AI PDF Assistant")
-st.sidebar.markdown("### Features")
 st.sidebar.markdown("""
+### Features
 - Multi-PDF Upload  
-- Smart Keyword Highlight  
+- Keyword Highlight  
 - Semantic AI Search  
-- Multi Answer Retrieval  
-- Download Processed Text  
+- Smart Summary  
+- Download Text  
 """)
 
 # -------------------------------------------------
@@ -75,7 +74,7 @@ with colB:
     st.caption("AI Powered Multi-Document Intelligence System")
 
 # -------------------------------------------------
-# Multi PDF Upload
+# Upload Multiple PDFs
 # -------------------------------------------------
 uploaded_files = st.file_uploader(
     "Upload one or more PDF files",
@@ -114,7 +113,7 @@ if uploaded_files:
     st.divider()
 
     # -------------------------------------------------
-    # Search & Highlight
+    # Search Highlight
     # -------------------------------------------------
     st.subheader("🔍 Search Inside Documents")
 
@@ -133,6 +132,25 @@ if uploaded_files:
     st.divider()
 
     # -------------------------------------------------
+    # Smart Summary
+    # -------------------------------------------------
+    st.subheader("📌 Smart Document Summary")
+
+    if st.button("Generate AI Summary"):
+
+        chunks = text.split("\n")
+        chunks = [c.strip() for c in chunks if len(c) > 80]
+
+        if chunks:
+            summary = "\n\n".join(chunks[:3])
+            st.success("AI Generated Summary:")
+            st.write(summary)
+        else:
+            st.write("Document content not sufficient for summary.")
+
+    st.divider()
+
+    # -------------------------------------------------
     # AI Semantic Chat
     # -------------------------------------------------
     st.subheader("🤖 Ask AI About Your Documents")
@@ -143,7 +161,6 @@ if uploaded_files:
 
     model = load_model()
 
-    # Paragraph chunking
     chunks = text.split("\n")
     chunks = [c.strip() for c in chunks if len(c) > 50]
 
@@ -185,4 +202,4 @@ else:
     st.info("Upload one or more PDF files to get started.")
 
 st.divider()
-st.caption("Built with Python, Streamlit & Semantic AI | Enterprise Portfolio Project")
+st.caption("Built with Python, Streamlit & Semantic AI | Portfolio Project")
