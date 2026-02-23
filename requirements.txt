@@ -9,4 +9,7 @@ matplotlib
 pandas
 scikit-learn
 bcrypt
+psycopg-binary
+sqlalchemy
+
 
