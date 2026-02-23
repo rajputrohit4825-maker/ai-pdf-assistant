@@ -1,8 +1,9 @@
 import streamlit as st
 from PyPDF2 import PdfReader
+import re
 
-st.set_page_config(page_title="Smart Free AI PDF Assistant", layout="wide")
-st.title("📄 Smart Free AI PDF Assistant")
+st.set_page_config(page_title="Smart AI PDF Assistant", layout="wide")
+st.title("📄 Smart AI PDF Assistant (Hindi + English Supported)")
 
 uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
 
@@ -27,26 +28,31 @@ if uploaded_file:
         st.divider()
         st.subheader("💬 Ask Question From PDF")
 
-        user_question = st.text_input("Ask a question")
+        user_question = st.text_input("Ask a question (Hindi or English)")
 
         if st.button("Search Answer") and user_question:
 
-            sentences = text.split(". ")
+            # Split by English dot, Hindi danda, or line break
+            sentences = re.split(r"[.\n।]", text)
+
             question_words = user_question.lower().split()
 
             scored_sentences = []
 
             for sentence in sentences:
+                clean_sentence = sentence.strip()
+                if len(clean_sentence) < 10:
+                    continue
+
                 score = 0
                 for word in question_words:
-                    if word in sentence.lower():
+                    if word in clean_sentence.lower():
                         score += 1
 
                 if score > 0:
-                    scored_sentences.append((score, sentence.strip()))
+                    scored_sentences.append((score, clean_sentence))
 
             if scored_sentences:
-                # Sort by highest score
                 scored_sentences.sort(reverse=True)
 
                 st.success("Top Relevant Answers ✅")
