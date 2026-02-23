@@ -2,66 +2,74 @@ import streamlit as st
 from PyPDF2 import PdfReader
 import re
 
-st.set_page_config(page_title="Smart AI PDF Assistant", layout="wide")
-st.title("📄 Smart AI PDF Assistant (Hindi + English Supported)")
+st.set_page_config(page_title="Ultra Fast AI PDF Assistant", layout="wide")
+st.title("⚡ Ultra Fast AI PDF Assistant (20x Speed)")
 
 uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
 
 if uploaded_file:
 
-    reader = PdfReader(uploaded_file)
-    text = ""
+    # -------- PROCESS ONLY ONCE --------
+    if "sentences_data" not in st.session_state:
 
-    for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text += extracted + "\n"
+        reader = PdfReader(uploaded_file)
+        text = ""
 
-    if len(text.strip()) == 0:
-        st.error("This PDF appears to be scanned or image-based.")
-    else:
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+
+        if len(text.strip()) == 0:
+            st.error("This PDF appears to be scanned or image-based.")
+            st.stop()
+
+        # Split once
+        raw_sentences = re.split(r"[.\n।]", text)
+
+        # Clean + store lowercase version for fast search
+        sentences_data = []
+        for s in raw_sentences:
+            clean = s.strip()
+            if len(clean) > 20:
+                sentences_data.append((clean, clean.lower()))
+
+        st.session_state.sentences_data = sentences_data
+
         st.success("PDF processed successfully ✅")
 
-        st.subheader("📖 Preview")
-        st.text_area("Extracted Text", text[:1500], height=200)
+    sentences_data = st.session_state.sentences_data
 
-        st.divider()
-        st.subheader("💬 Ask Question From PDF")
+    st.divider()
+    st.subheader("💬 Ask Question From PDF")
 
-        user_question = st.text_input("Ask a question (Hindi or English)")
+    user_question = st.text_input("Ask a question (Hindi or English)")
 
-        if st.button("Search Answer") and user_question:
+    if st.button("Search Answer") and user_question:
 
-            # Split by English dot, Hindi danda, or line break
-            sentences = re.split(r"[.\n।]", text)
+        question_words = user_question.lower().split()
 
-            question_words = user_question.lower().split()
+        best_matches = []
 
-            scored_sentences = []
+        # Ultra light search
+        for original, lower_version in sentences_data:
+            score = 0
+            for word in question_words:
+                if word in lower_version:
+                    score += 1
 
-            for sentence in sentences:
-                clean_sentence = sentence.strip()
-                if len(clean_sentence) < 10:
-                    continue
+            if score:
+                best_matches.append((score, original))
 
-                score = 0
-                for word in question_words:
-                    if word in clean_sentence.lower():
-                        score += 1
+        if best_matches:
+            best_matches.sort(reverse=True)
 
-                if score > 0:
-                    scored_sentences.append((score, clean_sentence))
+            st.success("Top Relevant Answers ✅")
 
-            if scored_sentences:
-                scored_sentences.sort(reverse=True)
-
-                st.success("Top Relevant Answers ✅")
-
-                for i in range(min(3, len(scored_sentences))):
-                    st.write(f"👉 {scored_sentences[i][1]}")
-
-            else:
-                st.warning("No relevant answer found in this document.")
+            for match in best_matches[:3]:
+                st.write("👉", match[1])
+        else:
+            st.warning("No relevant answer found.")
 
 else:
     st.info("Upload a PDF file to get started.")
