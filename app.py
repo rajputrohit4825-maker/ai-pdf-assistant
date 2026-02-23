@@ -15,6 +15,7 @@ uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
 
 if uploaded_file:
 
+    # Extract text from PDF
     reader = PdfReader(uploaded_file)
     text = ""
 
@@ -25,9 +26,11 @@ if uploaded_file:
 
     st.success("PDF processed successfully ✅")
 
+    # Preview Section
     st.subheader("📖 Preview")
     st.text_area("Extracted Content", text[:3000], height=250)
 
+    # ---------------- AI CHAT SECTION ----------------
     st.divider()
     st.subheader("💬 Ask AI About This PDF")
 
@@ -44,15 +47,18 @@ if uploaded_file:
         if len(chunks) == 0:
             st.error("Document too small for AI processing.")
         else:
+            # Load embedding model
             model = SentenceTransformer("all-MiniLM-L6-v2")
             embeddings = model.encode(chunks)
 
+            # Encode question
             query_embedding = model.encode([user_question])
             similarities = np.dot(embeddings, query_embedding.T).flatten()
 
             top_indices = similarities.argsort()[-3:][::-1]
             context = "\n\n".join([chunks[i] for i in top_indices])
 
+            # GPT Call
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -66,6 +72,7 @@ if uploaded_file:
             st.session_state.chat_history.append(("You", user_question))
             st.session_state.chat_history.append(("AI", answer))
 
+    # Display chat history
     for role, message in st.session_state.chat_history:
         st.markdown(f"**{role}:** {message}")
 
