@@ -1,8 +1,8 @@
 import streamlit as st
 from PyPDF2 import PdfReader
 
-st.set_page_config(page_title="Free AI PDF Assistant", layout="wide")
-st.title("📄 Free AI PDF Assistant (No API Needed)")
+st.set_page_config(page_title="Smart Free AI PDF Assistant", layout="wide")
+st.title("📄 Smart Free AI PDF Assistant")
 
 uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
 
@@ -32,19 +32,30 @@ if uploaded_file:
         if st.button("Search Answer") and user_question:
 
             sentences = text.split(". ")
-            best_match = ""
+            question_words = user_question.lower().split()
+
+            scored_sentences = []
 
             for sentence in sentences:
-                if user_question.lower() in sentence.lower():
-                    best_match = sentence
-                    break
+                score = 0
+                for word in question_words:
+                    if word in sentence.lower():
+                        score += 1
 
-            if best_match:
-                st.success("Answer Found ✅")
-                st.write(best_match)
+                if score > 0:
+                    scored_sentences.append((score, sentence.strip()))
+
+            if scored_sentences:
+                # Sort by highest score
+                scored_sentences.sort(reverse=True)
+
+                st.success("Top Relevant Answers ✅")
+
+                for i in range(min(3, len(scored_sentences))):
+                    st.write(f"👉 {scored_sentences[i][1]}")
+
             else:
-                st.warning("Exact match not found. Showing closest content:")
-                st.write(sentences[:3])
+                st.warning("No relevant answer found in this document.")
 
 else:
     st.info("Upload a PDF file to get started.")
