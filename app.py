@@ -4,8 +4,31 @@ from sentence_transformers import SentenceTransformer
 from openai import OpenAI
 import numpy as np
 
+# Load OpenAI client
 client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-   st.divider()
+
+st.set_page_config(page_title="AI PDF Assistant", layout="wide")
+st.title("📄 Professional AI PDF Assistant")
+
+uploaded_file = st.file_uploader("Upload your PDF file", type="pdf")
+
+if uploaded_file:
+
+    reader = PdfReader(uploaded_file)
+    text = ""
+
+    for page in reader.pages:
+        extracted = page.extract_text()
+        if extracted:
+            text += extracted
+
+    st.success("PDF processed successfully ✅")
+
+    st.subheader("📖 Preview")
+    st.text_area("Extracted Text", text[:2000], height=200)
+
+    # ---------------- AI CHAT SECTION ----------------
+    st.divider()
     st.subheader("💬 Ask AI About This PDF")
 
     if "chat_history" not in st.session_state:
@@ -15,7 +38,6 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
     if st.button("Ask AI") and user_question:
 
-        # Split into chunks (no strict filtering)
         chunks = text.split(". ")
         chunks = [c.strip() for c in chunks if len(c) > 5]
 
@@ -44,7 +66,5 @@ client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
             st.session_state.chat_history.append(("You", user_question))
             st.session_state.chat_history.append(("AI", answer))
 
-    # Display chat history
     for role, message in st.session_state.chat_history:
-        st.markdown(f"**{role}:** {message}")]
-
+        st.markdown(f"**{role}:** {message}")
