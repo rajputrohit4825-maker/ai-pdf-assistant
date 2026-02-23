@@ -1,14 +1,17 @@
 import streamlit as st
 import sqlite3
-import hashlib
-import secrets
-from datetime import datetime, timedelta
+import json
+import re
+from datetime import datetime
+from sentence_transformers import SentenceTransformer
+import numpy as np
+from PyPDF2 import PdfReader
 from passlib.context import CryptContext
 
 # ---------------- PAGE CONFIG ----------------
-st.set_page_config(page_title="AI PDF Platform Secure", layout="wide")
+st.set_page_config(page_title="AI PDF Platform v2", layout="wide")
 
-# ---------------- DB SETUP ----------------
+# ---------------- DATABASE ----------------
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -16,11 +19,29 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
-    password TEXT,
-    reset_token TEXT,
-    token_expiry TEXT
+    password TEXT
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    content TEXT,
+    embedding TEXT,
+    created_at TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT,
+    question TEXT,
+    timestamp TEXT
+)
+""")
+
 conn.commit()
 
 # ---------------- SECURITY ----------------
@@ -32,7 +53,7 @@ def hash_password(password):
 def verify_password(password, hashed):
     return pwd_context.verify(password, hashed)
 
-# ---------------- AUTH FUNCTIONS ----------------
+# ---------------- AUTH ----------------
 def register_user(username, password):
     try:
         cursor.execute(
@@ -51,63 +72,35 @@ def login_user(username, password):
         return True
     return False
 
-def generate_reset_token(username):
-    token = secrets.token_hex(16)
-    expiry = datetime.now() + timedelta(minutes=10)
+# ---------------- MODEL CACHE ----------------
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-    cursor.execute("""
-        UPDATE users
-        SET reset_token=?, token_expiry=?
-        WHERE username=?
-    """, (token, expiry.isoformat(), username))
-    conn.commit()
-
-    return token
-
-def reset_password(token, new_password):
-    cursor.execute("""
-        SELECT username, token_expiry
-        FROM users
-        WHERE reset_token=?
-    """, (token,))
-    result = cursor.fetchone()
-
-    if result:
-        expiry_time = datetime.fromisoformat(result[1])
-        if datetime.now() < expiry_time:
-            cursor.execute("""
-                UPDATE users
-                SET password=?, reset_token=NULL, token_expiry=NULL
-                WHERE reset_token=?
-            """, (hash_password(new_password), token))
-            conn.commit()
-            return True
-
-    return False
+model = load_model()
 
 # ---------------- SESSION ----------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
-# ---------------- LOGIN SYSTEM ----------------
+# ---------------- LOGIN ----------------
 if not st.session_state.logged_in:
 
-    st.title("🔐 Secure Login System")
+    st.title("🔐 Secure Login")
 
-    menu = st.radio("Select Option", ["Login", "Register", "Forgot Password", "Reset Password"])
+    menu = st.radio("Select", ["Login", "Register"])
+
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
     if menu == "Register":
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
         if st.button("Register"):
             if register_user(username, password):
-                st.success("Account created successfully")
+                st.success("Account Created")
             else:
-                st.error("Username already exists")
+                st.error("Username exists")
 
     if menu == "Login":
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
         if st.button("Login"):
             if login_user(username, password):
                 st.session_state.logged_in = True
@@ -115,21 +108,6 @@ if not st.session_state.logged_in:
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-
-    if menu == "Forgot Password":
-        username = st.text_input("Enter your username")
-        if st.button("Generate Reset Token"):
-            token = generate_reset_token(username)
-            st.info(f"Your reset token (valid 10 min): {token}")
-
-    if menu == "Reset Password":
-        token = st.text_input("Enter Reset Token")
-        new_password = st.text_input("New Password", type="password")
-        if st.button("Reset Password"):
-            if reset_password(token, new_password):
-                st.success("Password reset successfully")
-            else:
-                st.error("Invalid or expired token")
 
 # ---------------- MAIN APP ----------------
 if st.session_state.logged_in:
@@ -140,5 +118,94 @@ if st.session_state.logged_in:
         st.session_state.logged_in = False
         st.rerun()
 
-    st.title("📄 AI PDF Platform – Secure Mode")
-    st.success("Phase 1 Security Upgrade Active")
+    st.title("📄 AI PDF Platform – Phase 2 Database Upgrade")
+
+    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+
+    if uploaded_file:
+
+        reader = PdfReader(uploaded_file)
+        text = ""
+
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+
+        sentences = re.split(r"[.\n।]", text)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 30]
+
+        st.info("Indexing document...")
+
+        for sentence in sentences:
+            embedding = model.encode(sentence).tolist()
+
+            cursor.execute("""
+                INSERT INTO documents (username, content, embedding, created_at)
+                VALUES (?, ?, ?, ?)
+            """, (
+                st.session_state.username,
+                sentence,
+                json.dumps(embedding),
+                str(datetime.now())
+            ))
+
+        conn.commit()
+        st.success("Document Indexed Successfully")
+
+    st.divider()
+    st.subheader("💬 Ask Question")
+
+    query = st.text_input("Enter your question")
+
+    if query:
+
+        query_embedding = model.encode(query)
+
+        cursor.execute("""
+            SELECT content, embedding
+            FROM documents
+            WHERE username=?
+        """, (st.session_state.username,))
+
+        records = cursor.fetchall()
+
+        best_score = -1
+        best_answer = ""
+
+        for content, emb_text in records:
+            embedding = np.array(json.loads(emb_text))
+            score = np.dot(embedding, query_embedding)
+
+            if score > best_score:
+                best_score = score
+                best_answer = content
+
+        st.success("Best Answer:")
+        st.write(best_answer)
+
+        cursor.execute("""
+            INSERT INTO history (username, question, timestamp)
+            VALUES (?, ?, ?)
+        """, (
+            st.session_state.username,
+            query,
+            str(datetime.now())
+        ))
+
+        conn.commit()
+
+    # ---------------- ANALYTICS ----------------
+    st.divider()
+    st.subheader("📊 Analytics")
+
+    cursor.execute("SELECT COUNT(*) FROM documents WHERE username=?",
+                   (st.session_state.username,))
+    doc_count = cursor.fetchone()[0]
+
+    cursor.execute("SELECT COUNT(*) FROM history WHERE username=?",
+                   (st.session_state.username,))
+    query_count = cursor.fetchone()[0]
+
+    st.metric("Indexed Chunks", doc_count)
+    st.metric("Total Queries", query_count)
