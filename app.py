@@ -3,6 +3,7 @@ from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 import numpy as np
 import re
+from fpdf import FPDF
 
 # -------------------------------------------------
 # Page Config
@@ -19,14 +20,12 @@ st.set_page_config(
 st.markdown("""
 <style>
 body { background-color: #0E1117; }
-
 [data-testid="stMetric"] {
     background-color: #1E2228;
     padding: 15px;
     border-radius: 12px;
     text-align: center;
 }
-
 .stButton>button {
     background-color: #2962FF;
     color: white;
@@ -35,7 +34,6 @@ body { background-color: #0E1117; }
     width: 100%;
     font-weight: 600;
 }
-
 .stDownloadButton>button {
     background-color: #00C853;
     color: white;
@@ -44,7 +42,6 @@ body { background-color: #0E1117; }
     width: 100%;
     font-weight: 600;
 }
-
 .block-container { padding-top: 2rem; }
 footer {visibility: hidden;}
 </style>
@@ -53,28 +50,24 @@ footer {visibility: hidden;}
 # -------------------------------------------------
 # Sidebar
 # -------------------------------------------------
-st.sidebar.markdown("## 📄 AI PDF Assistant")
+st.sidebar.markdown("## 📄 AI PDF Intelligence System")
 st.sidebar.markdown("""
 ### Features
-- Multi-PDF Upload  
-- Keyword Highlight  
-- Semantic AI Search  
-- Smart Summary  
-- Download Text  
+- Multi PDF Upload  
+- Smart Highlight  
+- Bullet Summary  
+- Semantic AI Chat  
+- Export Answers as PDF  
 """)
 
 # -------------------------------------------------
 # Header
 # -------------------------------------------------
-colA, colB = st.columns([1, 6])
-with colA:
-    st.image("https://cdn-icons-png.flaticon.com/512/337/337946.png", width=60)
-with colB:
-    st.markdown("## Professional AI PDF Knowledge Base")
-    st.caption("AI Powered Multi-Document Intelligence System")
+st.title("Professional AI PDF Knowledge Base")
+st.caption("Advanced Multi-Document Intelligence Engine")
 
 # -------------------------------------------------
-# Upload Multiple PDFs
+# Upload PDFs
 # -------------------------------------------------
 uploaded_files = st.file_uploader(
     "Upload one or more PDF files",
@@ -97,27 +90,21 @@ if uploaded_files:
                 if extracted:
                     text += extracted
 
-    st.success("Documents analyzed successfully. AI is ready.")
+    st.success("Documents analyzed successfully")
 
-    # -------------------------------------------------
     # Stats
-    # -------------------------------------------------
-    total_words = len(text.split())
-    total_chars = len(text)
-
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Pages", total_pages)
-    col2.metric("Total Words", total_words)
-    col3.metric("Total Characters", total_chars)
+    col1.metric("Pages", total_pages)
+    col2.metric("Words", len(text.split()))
+    col3.metric("Characters", len(text))
 
     st.divider()
 
     # -------------------------------------------------
-    # Search Highlight
+    # Highlight Search
     # -------------------------------------------------
-    st.subheader("🔍 Search Inside Documents")
-
-    search_query = st.text_input("Enter keyword to highlight")
+    st.subheader("Search & Highlight")
+    search_query = st.text_input("Enter keyword")
 
     preview_text = text[:3000]
 
@@ -132,28 +119,28 @@ if uploaded_files:
     st.divider()
 
     # -------------------------------------------------
-    # Smart Summary
+    # Smart Bullet Summary
     # -------------------------------------------------
-    st.subheader("📌 Smart Document Summary")
+    st.subheader("Smart Bullet Summary")
 
-    if st.button("Generate AI Summary"):
+    if st.button("Generate Summary"):
+        sentences = text.split(".")
+        sentences = [s.strip() for s in sentences if len(s) > 60]
 
-        chunks = text.split("\n")
-        chunks = [c.strip() for c in chunks if len(c) > 80]
-
-        if chunks:
-            summary = "\n\n".join(chunks[:3])
-            st.success("AI Generated Summary:")
-            st.write(summary)
+        if sentences:
+            summary_points = sentences[:5]
+            st.success("Key Points:")
+            for point in summary_points:
+                st.markdown(f"- {point}")
         else:
-            st.write("Document content not sufficient for summary.")
+            st.write("Document too short for summary.")
 
     st.divider()
 
     # -------------------------------------------------
     # AI Semantic Chat
     # -------------------------------------------------
-    st.subheader("🤖 Ask AI About Your Documents")
+    st.subheader("Ask AI About Your Documents")
 
     @st.cache_resource(show_spinner=False)
     def load_model():
@@ -171,12 +158,16 @@ if uploaded_files:
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
 
-        user_question = st.chat_input("Ask something about your documents")
+        colA, colB = st.columns([4,1])
+        with colA:
+            user_question = st.chat_input("Ask something about your documents")
+        with colB:
+            if st.button("Clear Chat"):
+                st.session_state.chat_history = []
 
         if user_question:
             query_embedding = model.encode([user_question])
             similarities = np.dot(embeddings, query_embedding.T).flatten()
-
             top_indices = similarities.argsort()[-3:][::-1]
             best_match = "\n\n".join([chunks[i] for i in top_indices])
 
@@ -187,19 +178,29 @@ if uploaded_files:
             with st.chat_message(role):
                 st.write(message)
 
-    st.divider()
+        # -------------------------------------------------
+        # Export Chat as PDF
+        # -------------------------------------------------
+        if st.session_state.chat_history:
+            pdf = FPDF()
+            pdf.set_auto_page_break(auto=True, margin=15)
+            pdf.add_page()
+            pdf.set_font("Arial", size=10)
 
-    # -------------------------------------------------
-    # Download
-    # -------------------------------------------------
-    st.download_button(
-        label="📥 Download Combined Extracted Text",
-        data=text,
-        file_name="combined_extracted_text.txt"
-    )
+            for role, message in st.session_state.chat_history:
+                pdf.multi_cell(0, 8, f"{role.upper()}: {message}")
+                pdf.ln()
+
+            pdf_output = pdf.output(dest="S").encode("latin-1")
+
+            st.download_button(
+                label="Download Chat as PDF",
+                data=pdf_output,
+                file_name="ai_chat_export.pdf"
+            )
 
 else:
-    st.info("Upload one or more PDF files to get started.")
+    st.info("Upload PDF files to begin.")
 
 st.divider()
-st.caption("Built with Python, Streamlit & Semantic AI | Portfolio Project")
+st.caption("Enterprise AI PDF System | Built with Python & Semantic Search")
