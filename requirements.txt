@@ -11,5 +11,6 @@ scikit-learn
 bcrypt
 psycopg-binary
 sqlalchemy
+passlib[bcrypt]
 
 
