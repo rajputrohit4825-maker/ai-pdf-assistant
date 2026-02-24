@@ -1,7 +1,6 @@
 import streamlit as st
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
-import numpy as np
 from sqlalchemy import create_engine, text
 from datetime import datetime
 
@@ -25,24 +24,26 @@ except Exception as e:
     st.error(f"Database Connection Failed: {e}")
 
 # -----------------------------------
-# SIMPLE LOGIN SYSTEM
+# LOGIN SYSTEM (STABLE)
 # -----------------------------------
 if "username" not in st.session_state:
-    st.session_state.username = None
+    st.session_state["username"] = ""
 
-if not st.session_state.username:
-    st.subheader("🔐 Login")
+if not st.session_state["username"]:
+    st.subheader("🔐 Login Required")
     username_input = st.text_input("Enter Username")
+
     if st.button("Login"):
         if username_input.strip():
-            st.session_state.username = username_input.strip()
-            st.success("Logged in successfully ✅")
+            st.session_state["username"] = username_input.strip()
+            st.success("Login Successful ✅")
             st.rerun()
         else:
             st.error("Username cannot be empty")
+
     st.stop()
 
-st.sidebar.success(f"Logged in as: {st.session_state.username}")
+st.sidebar.success(f"Logged in as: {st.session_state['username']}")
 
 # -----------------------------------
 # LOAD EMBEDDING MODEL
@@ -54,7 +55,7 @@ def load_model():
 model = load_model()
 
 # -----------------------------------
-# PDF UPLOAD
+# PDF UPLOAD & INDEX
 # -----------------------------------
 st.subheader("📂 Upload PDF")
 uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
@@ -90,7 +91,7 @@ if uploaded_file:
                             (:username, :content, CAST(:embedding AS vector), :created_at)
                         """),
                         {
-                            "username": st.session_state.username,
+                            "username": st.session_state["username"],
                             "content": sentence,
                             "embedding": vector_str,
                             "created_at": datetime.utcnow()
@@ -123,7 +124,7 @@ if st.button("Search") and query:
                 LIMIT 3;
             """),
             {
-                "username": st.session_state.username,
+                "username": st.session_state["username"],
                 "query_vector": vector_str
             }
         )
@@ -146,7 +147,14 @@ st.sidebar.subheader("📊 Stats")
 with engine.connect() as conn:
     count = conn.execute(
         text("SELECT COUNT(*) FROM documents WHERE username = :username"),
-        {"username": st.session_state.username}
+        {"username": st.session_state["username"]}
     ).scalar()
 
 st.sidebar.write(f"Indexed Chunks: {count}")
+
+# -----------------------------------
+# LOGOUT BUTTON
+# -----------------------------------
+if st.sidebar.button("Logout"):
+    st.session_state["username"] = ""
+    st.rerun()
