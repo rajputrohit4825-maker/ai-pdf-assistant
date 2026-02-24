@@ -3,59 +3,147 @@ from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from sqlalchemy import create_engine, text
 from datetime import datetime
+import bcrypt
 
-# -----------------------------------
-# PAGE CONFIG
-# -----------------------------------
+# -------------------------------
+# CONFIG
+# -------------------------------
 st.set_page_config(page_title="AI PDF Platform", layout="wide")
-st.title("📄 AI PDF Platform (PostgreSQL + Vector Ready)")
+st.title("📄 AI PDF Platform")
 
-# -----------------------------------
-# DATABASE CONNECTION
-# -----------------------------------
 DATABASE_URL = st.secrets["DATABASE_URL"]
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
-try:
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
-    st.success("Database Connected Successfully ✅")
-except Exception as e:
-    st.error(f"Database Connection Failed: {e}")
+# -------------------------------
+# PASSWORD HELPERS
+# -------------------------------
+def hash_password(password):
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
 
-# -----------------------------------
-# LOGIN SYSTEM
-# -----------------------------------
-if "username" not in st.session_state:
-    st.session_state["username"] = ""
+def verify_password(password, hashed):
+    return bcrypt.checkpw(password.encode(), hashed.encode())
 
-if not st.session_state["username"]:
-    st.subheader("🔐 Login Required")
-    username_input = st.text_input("Enter Username")
+# -------------------------------
+# SESSION INIT
+# -------------------------------
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+# -------------------------------
+# AUTH FUNCTIONS
+# -------------------------------
+def register():
+    st.subheader("Create Account")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+
+    if st.button("Register"):
+        if not username or not password:
+            st.error("All fields required")
+            return
+
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("""
+                        INSERT INTO users (username, password_hash)
+                        VALUES (:username, :password)
+                    """),
+                    {
+                        "username": username.strip(),
+                        "password": hash_password(password)
+                    }
+                )
+            st.success("Account created. You can login now.")
+        except:
+            st.error("Username already exists")
+
+
+def login():
+    st.subheader("Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
     if st.button("Login"):
-        if username_input.strip():
-            st.session_state["username"] = username_input.strip()
+        with engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT password_hash FROM users WHERE username=:username"),
+                {"username": username.strip()}
+            ).fetchone()
+
+        if result and verify_password(password, result[0]):
+            st.session_state.user = username.strip()
+            st.success("Login successful")
             st.rerun()
         else:
-            st.error("Username cannot be empty")
+            st.error("Invalid username or password")
+
+
+def forgot_password():
+    st.subheader("Reset Password")
+    username = st.text_input("Username")
+    new_password = st.text_input("New Password", type="password")
+
+    if st.button("Reset Password"):
+        with engine.begin() as conn:
+            result = conn.execute(
+                text("SELECT id FROM users WHERE username=:username"),
+                {"username": username.strip()}
+            ).fetchone()
+
+            if result:
+                conn.execute(
+                    text("""
+                        UPDATE users
+                        SET password_hash=:password
+                        WHERE username=:username
+                    """),
+                    {
+                        "username": username.strip(),
+                        "password": hash_password(new_password)
+                    }
+                )
+                st.success("Password updated successfully")
+            else:
+                st.error("User not found")
+
+# -------------------------------
+# AUTH ROUTING
+# -------------------------------
+if not st.session_state.user:
+    menu = st.radio("Select Option", ["Login", "Register", "Forgot Password"])
+
+    if menu == "Login":
+        login()
+    elif menu == "Register":
+        register()
+    else:
+        forgot_password()
+
     st.stop()
 
-st.sidebar.success(f"Logged in as: {st.session_state['username']}")
+# -------------------------------
+# LOGGED IN UI
+# -------------------------------
+st.sidebar.success(f"Logged in as: {st.session_state.user}")
 
-# -----------------------------------
+if st.sidebar.button("Logout"):
+    st.session_state.user = None
+    st.rerun()
+
+# -------------------------------
 # LOAD EMBEDDING MODEL
-# -----------------------------------
+# -------------------------------
 @st.cache_resource
 def load_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 model = load_model()
 
-# -----------------------------------
-# PDF UPLOAD & INDEXING
-# -----------------------------------
-st.subheader("📂 Upload PDF")
+# -------------------------------
+# PDF UPLOAD
+# -------------------------------
+st.subheader("Upload PDF")
 uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
 
 if uploaded_file:
@@ -63,66 +151,55 @@ if uploaded_file:
     text_content = ""
 
     for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text_content += extracted
+        page_text = page.extract_text()
+        if page_text:
+            text_content += page_text
 
     if not text_content.strip():
-        st.error("No readable text found in PDF ❌")
+        st.error("No readable text found")
     else:
-        st.success("PDF text extracted ✅")
+        chunks = [text_content[i:i+500] for i in range(0, len(text_content), 500)]
+        st.write("Chunks created:", len(chunks))
 
-        # 🔥 500-character chunking (guaranteed insert)
-        sentences = [
-            text_content[i:i+500]
-            for i in range(0, len(text_content), 500)
-        ]
-
-        st.write(f"Chunks created: {len(sentences)}")
-
-        if st.button("Index Document to Database"):
-
-            inserted_count = 0
-
+        if st.button("Index Document"):
             with engine.begin() as conn:
-                for sentence in sentences:
-                    embedding = model.encode(sentence).tolist()
+                for chunk in chunks:
+                    embedding = model.encode(chunk).tolist()
                     vector_str = "[" + ",".join(map(str, embedding)) + "]"
 
                     conn.execute(
                         text("""
-                            INSERT INTO documents 
+                            INSERT INTO documents
                             (username, content, embedding_vector, created_at)
-                            VALUES 
-                            (:username, :content, CAST(:embedding AS vector), :created_at)
+                            VALUES
+                            (:username, :content,
+                             CAST(:embedding AS vector),
+                             :created_at)
                         """),
                         {
-                            "username": st.session_state["username"],
-                            "content": sentence,
+                            "username": st.session_state.user,
+                            "content": chunk,
                             "embedding": vector_str,
                             "created_at": datetime.utcnow()
                         }
                     )
 
-                    inserted_count += 1
+            st.success("Document indexed successfully")
 
-            st.success(f"Inserted {inserted_count} chunks successfully ✅")
-
-# -----------------------------------
-# SEARCH SECTION
-# -----------------------------------
+# -------------------------------
+# SEARCH
+# -------------------------------
 st.divider()
-st.subheader("🔎 Ask a Question")
+st.subheader("Ask a Question")
 
-query = st.text_input("Enter your question")
+query = st.text_input("Enter question")
 
 if st.button("Search") and query:
-
     query_vector = model.encode(query).tolist()
     vector_str = "[" + ",".join(map(str, query_vector)) + "]"
 
     with engine.connect() as conn:
-        result = conn.execute(
+        results = conn.execute(
             text("""
                 SELECT content,
                        1 - (embedding_vector <=> CAST(:query_vector AS vector)) AS similarity
@@ -132,37 +209,24 @@ if st.button("Search") and query:
                 LIMIT 3;
             """),
             {
-                "username": st.session_state["username"],
+                "username": st.session_state.user,
                 "query_vector": vector_str
             }
-        )
+        ).fetchall()
 
-        matches = result.fetchall()
-
-    if matches:
-        st.success("Top Relevant Results:")
-        for row in matches:
+    if results:
+        for row in results:
             st.write("•", row[0])
     else:
-        st.warning("No relevant answer found.")
+        st.warning("No relevant answer found")
 
-# -----------------------------------
-# SIDEBAR STATS
-# -----------------------------------
-st.sidebar.divider()
-st.sidebar.subheader("📊 Stats")
-
+# -------------------------------
+# STATS
+# -------------------------------
 with engine.connect() as conn:
     count = conn.execute(
-        text("SELECT COUNT(*) FROM documents WHERE username = :username"),
-        {"username": st.session_state["username"]}
+        text("SELECT COUNT(*) FROM documents WHERE username=:username"),
+        {"username": st.session_state.user}
     ).scalar()
 
-st.sidebar.write(f"Indexed Chunks: {count}")
-
-# -----------------------------------
-# LOGOUT
-# -----------------------------------
-if st.sidebar.button("Logout"):
-    st.session_state["username"] = ""
-    st.rerun()
+st.sidebar.write("Indexed Chunks:", count)
