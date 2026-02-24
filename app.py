@@ -19,27 +19,27 @@ from sentence_transformers import SentenceTransformer
 
 st.set_page_config(page_title="AI PDF SaaS Platform", layout="wide")
 
-# PREMIUM DARK UI
 st.markdown("""
 <style>
-body {
-    background-color: #0e1117;
-    color: white;
-}
+body { background-color: #0e1117; color: white; }
 .stButton>button {
     background: linear-gradient(90deg,#2563eb,#7c3aed);
     color: white;
     border-radius: 12px;
     padding: 0.5em 1em;
 }
-section[data-testid="stSidebar"] {
-    background-color: #111827;
-}
+section[data-testid="stSidebar"] { background-color: #111827; }
 </style>
 """, unsafe_allow_html=True)
 
 DATABASE_URL = st.secrets["DATABASE_URL"]
-engine = create_engine(DATABASE_URL)
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True
+)
 
 @st.cache_resource
 def load_model():
@@ -90,7 +90,6 @@ def send_otp_email(to_email, otp):
                 st.secrets["EMAIL_PASSWORD"]
             )
             server.send_message(msg)
-
         return True
     except:
         return False
@@ -102,6 +101,9 @@ def send_otp_email(to_email, otp):
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
 # ---------------------------------------------------
 # AUTH SECTION
 # ---------------------------------------------------
@@ -112,7 +114,6 @@ if not st.session_state.logged_in:
 
     tab1, tab2 = st.tabs(["Login", "Register"])
 
-    # LOGIN
     with tab1:
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
@@ -142,7 +143,6 @@ if not st.session_state.logged_in:
             else:
                 st.error("Invalid credentials")
 
-    # REGISTER
     with tab2:
         reg_email = st.text_input("Email", key="r1")
         reg_pass = st.text_input("Password", type="password", key="r2")
@@ -162,7 +162,6 @@ if not st.session_state.logged_in:
             except:
                 st.error("Email already exists")
 
-    # FORGOT PASSWORD
     st.subheader("Forgot Password")
 
     forgot_email = st.text_input("Enter registered email")
@@ -210,99 +209,7 @@ else:
         st.rerun()
 
     # ---------------------------------------------------
-    # ADMIN PANEL
-    # ---------------------------------------------------
-
-    if st.session_state.role == "admin":
-
-        st.header("🛠 Admin Dashboard")
-
-        with engine.connect() as conn:
-            total_users = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
-            total_chunks = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar()
-
-        col1, col2 = st.columns(2)
-        col1.metric("Total Users", total_users)
-        col2.metric("Total Chunks", total_chunks)
-
-        st.subheader("👥 Users")
-
-        with engine.connect() as conn:
-            users = conn.execute(
-                text("SELECT email, role, subscription_status FROM users")
-            ).fetchall()
-
-        for u in users:
-            st.write(f"{u[0]} | Role: {u[1]} | Plan: {u[2]}")
-
-        st.subheader("📊 Usage Chart")
-
-        with engine.connect() as conn:
-            file_counts = conn.execute(text("""
-                SELECT user_email, COUNT(DISTINCT file_name)
-                FROM documents
-                GROUP BY user_email
-            """)).fetchall()
-
-        if file_counts:
-            emails = [row[0] for row in file_counts]
-            counts = [row[1] for row in file_counts]
-
-            fig = plt.figure()
-            plt.bar(emails, counts)
-            plt.xticks(rotation=45)
-            plt.title("Files per User")
-            st.pyplot(fig)
-        else:
-            st.info("No usage data yet.")
-
-    # ---------------------------------------------------
-    # USER ANALYTICS
-    # ---------------------------------------------------
-
-    with engine.connect() as conn:
-        total_files = conn.execute(
-            text("SELECT COUNT(DISTINCT file_name) FROM documents WHERE user_email=:e"),
-            {"e": st.session_state.user_email}
-        ).scalar()
-
-        total_chunks = conn.execute(
-            text("SELECT COUNT(*) FROM documents WHERE user_email=:e"),
-            {"e": st.session_state.user_email}
-        ).scalar()
-
-    st.sidebar.metric("Your Files", total_files)
-    st.sidebar.metric("Your Chunks", total_chunks)
-
-    # ---------------------------------------------------
-    # DELETE FILE
-    # ---------------------------------------------------
-
-    with engine.connect() as conn:
-        files = conn.execute(
-            text("SELECT DISTINCT file_name FROM documents WHERE user_email=:e"),
-            {"e": st.session_state.user_email}
-        ).fetchall()
-
-    file_list = [f[0] for f in files]
-
-    if file_list:
-        selected_file = st.sidebar.selectbox("Your Files", file_list)
-
-        if st.sidebar.button("Delete Selected File"):
-            with engine.begin() as conn:
-                conn.execute(
-                    text("""
-                        DELETE FROM documents
-                        WHERE user_email=:e AND file_name=:f
-                    """),
-                    {"e": st.session_state.user_email, "f": selected_file}
-                )
-            st.sidebar.success("File deleted")
-            st.rerun()
-
-    # ---------------------------------------------------
-    # PDF UPLOAD
+    # PDF UPLOAD + SEARCH
     # ---------------------------------------------------
 
     st.header("📄 Upload PDF")
@@ -310,10 +217,6 @@ else:
     uploaded_file = st.file_uploader("Choose PDF", type="pdf")
 
     if uploaded_file:
-
-        if st.session_state.plan == "free" and total_files >= 3:
-            st.warning("Free plan allows only 3 PDFs")
-            st.stop()
 
         reader = PdfReader(uploaded_file)
         text_content = ""
@@ -324,15 +227,14 @@ else:
             chunks = []
             start = 0
             while start < len(text):
-                end = start + size
-                chunks.append(text[start:end])
+                chunks.append(text[start:start+size])
                 start += size - overlap
             return chunks
 
         chunks = create_chunks(text_content)
 
-        def background_index(chunks, file_name):
-            embeddings = model.encode(chunks, batch_size=32)
+        def background_index():
+            embeddings = model.encode(chunks, batch_size=64)
             with engine.begin() as conn:
                 for chunk, emb in zip(chunks, embeddings):
                     conn.execute(
@@ -343,23 +245,27 @@ else:
                         """),
                         {
                             "e": st.session_state.user_email,
-                            "f": file_name,
+                            "f": uploaded_file.name,
                             "c": chunk,
                             "emb": emb.tolist()
                         }
                     )
 
         if st.button("Index Document"):
-            thread = threading.Thread(
-                target=background_index,
-                args=(chunks, uploaded_file.name)
-            )
-            thread.start()
-            st.success("Indexing started in background")
+            threading.Thread(target=background_index).start()
+            st.success("Indexing started")
 
-    # ---------------------------------------------------
-    # SEARCH
-    # ---------------------------------------------------
+    # ---------------- CHAT DISPLAY ----------------
+
+    st.subheader("💬 Conversation")
+
+    for role, msg in st.session_state.chat_history:
+        if role == "You":
+            st.markdown(f"**🧑 You:** {msg}")
+        else:
+            st.markdown(f"**🤖 AI:** {msg}")
+
+    # ---------------- SEARCH ----------------
 
     st.header("🔎 Ask Question")
 
@@ -381,7 +287,7 @@ else:
                     SELECT content FROM documents
                     WHERE user_email=:e
                     ORDER BY embedding <=> :emb
-                    LIMIT 5
+                    LIMIT 3
                 """),
                 {
                     "e": st.session_state.user_email,
@@ -390,6 +296,7 @@ else:
             ).fetchall()
 
         if results:
+            combined_answer = ""
             for r in results:
                 highlighted = highlight(r[0], query)
                 st.markdown(f"""
@@ -398,5 +305,11 @@ else:
                 {highlighted}
                 </div>
                 """, unsafe_allow_html=True)
+                combined_answer += r[0] + "\n\n"
+
+            st.session_state.chat_history.append(("You", query))
+            st.session_state.chat_history.append(("AI", combined_answer.strip()))
         else:
             st.warning("No relevant answer found")
+            st.session_state.chat_history.append(("You", query))
+            st.session_state.chat_history.append(("AI", "No relevant answer found"))
