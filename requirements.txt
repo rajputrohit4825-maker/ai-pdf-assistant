@@ -12,6 +12,7 @@ bcrypt
 sqlalchemy
 passlib[bcrypt]
 psycopg2-binary
+pyjwt
 
 
 
