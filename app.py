@@ -1,264 +1,178 @@
 import streamlit as st
-from PyPDF2 import PdfReader
-from sentence_transformers import SentenceTransformer
-from sqlalchemy import create_engine, text
-from datetime import datetime, timedelta
-import bcrypt
-import jwt
 import random
 import smtplib
+import bcrypt
+from email.mime.text import MIMEText
+from datetime import datetime, timedelta
+from sqlalchemy import create_engine, text
 
-# ---------------------------
+# -------------------------
 # CONFIG
-# ---------------------------
-SECRET_KEY = "supersecretkey123"
+# -------------------------
+
 DATABASE_URL = st.secrets["DATABASE_URL"]
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+engine = create_engine(DATABASE_URL)
 
-st.set_page_config(layout="wide")
-st.title("🚀 AI PDF Platform Enterprise")
+st.set_page_config(page_title="Auth System", layout="centered")
+st.title("AI PDF Platform - Auth")
 
-# ---------------------------
-# HELPERS
-# ---------------------------
-def hash_password(password):
-    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+# -------------------------
+# EMAIL FUNCTION
+# -------------------------
 
-def verify_password(password, hashed):
-    return bcrypt.checkpw(password.encode(), hashed.encode())
-
-def create_token(username, role):
-    payload = {
-        "username": username,
-        "role": role,
-        "exp": datetime.utcnow() + timedelta(hours=2)
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-
-def decode_token(token):
+def send_otp_email(to_email, otp):
     try:
-        return jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-    except:
-        return None
+        msg = MIMEText(f"""
+Your OTP is: {otp}
+Valid for 10 minutes.
+""")
 
-# ---------------------------
-# SESSION INIT
-# ---------------------------
-if "token" not in st.session_state:
-    st.session_state.token = None
+        msg["Subject"] = "Password Reset OTP"
+        msg["From"] = st.secrets["EMAIL_ADDRESS"]
+        msg["To"] = to_email
 
-# ---------------------------
-# AUTH SECTION
-# ---------------------------
-def register():
-    st.subheader("Register")
-    username = st.text_input("Username")
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
-
-    if st.button("Create Account"):
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO users (username, email, password_hash)
-                    VALUES (:username, :email, :password)
-                """),
-                {
-                    "username": username,
-                    "email": email,
-                    "password": hash_password(password)
-                }
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(
+                st.secrets["EMAIL_ADDRESS"],
+                st.secrets["EMAIL_PASSWORD"]
             )
-        st.success("Account created")
+            server.send_message(msg)
 
-def login():
-    st.subheader("Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+        return True
 
-    if st.button("Login"):
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("SELECT password_hash, role FROM users WHERE username=:u"),
-                {"u": username}
-            ).fetchone()
+    except Exception as e:
+        st.error(f"Email error: {e}")
+        return False
 
-        if result and verify_password(password, result[0]):
-            token = create_token(username, result[1])
-            st.session_state.token = token
-            st.success("Login successful")
-            st.rerun()
-        else:
-            st.error("Invalid credentials")
+# -------------------------
+# CREATE USERS TABLE
+# -------------------------
 
-def forgot_password():
-    st.subheader("Forgot Password")
-    email = st.text_input("Enter Email")
+with engine.begin() as conn:
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            email TEXT UNIQUE,
+            password TEXT
+        )
+    """))
 
-    if st.button("Send OTP"):
+# -------------------------
+# SESSION
+# -------------------------
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+# -------------------------
+# REGISTER
+# -------------------------
+
+st.subheader("Register")
+
+reg_email = st.text_input("Email", key="reg_email")
+reg_password = st.text_input("Password", type="password", key="reg_pass")
+
+if st.button("Register"):
+    if reg_email and reg_password:
+        hashed = bcrypt.hashpw(reg_password.encode(), bcrypt.gensalt()).decode()
+
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("INSERT INTO users (email, password) VALUES (:email, :password)"),
+                    {"email": reg_email, "password": hashed}
+                )
+            st.success("Registration successful")
+        except:
+            st.error("Email already exists")
+
+# -------------------------
+# LOGIN
+# -------------------------
+
+st.subheader("Login")
+
+login_email = st.text_input("Email", key="login_email")
+login_password = st.text_input("Password", type="password", key="login_pass")
+
+if st.button("Login"):
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT password FROM users WHERE email = :email"),
+            {"email": login_email}
+        ).fetchone()
+
+    if result and bcrypt.checkpw(login_password.encode(), result[0].encode()):
+        st.session_state.logged_in = True
+        st.session_state.user_email = login_email
+        st.success("Login successful")
+    else:
+        st.error("Invalid credentials")
+
+# -------------------------
+# FORGOT PASSWORD
+# -------------------------
+
+st.subheader("Forgot Password")
+
+forgot_email = st.text_input("Enter your registered email")
+
+if st.button("Send OTP"):
+    if forgot_email:
         otp = str(random.randint(100000, 999999))
-        with engine.begin() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO password_resets (email, otp)
-                    VALUES (:email, :otp)
-                """),
-                {"email": email, "otp": otp}
-            )
-        st.success(f"OTP Generated: {otp}")  # demo mode
+
+        st.session_state.reset_otp = otp
+        st.session_state.reset_email = forgot_email
+        st.session_state.otp_expiry = datetime.utcnow() + timedelta(minutes=10)
+
+        if send_otp_email(forgot_email, otp):
+            st.success("OTP sent to your email")
+
+# -------------------------
+# OTP VERIFY + RESET
+# -------------------------
+
+if "reset_otp" in st.session_state:
 
     entered_otp = st.text_input("Enter OTP")
-    new_pass = st.text_input("New Password", type="password")
+    new_password = st.text_input("New Password", type="password")
 
     if st.button("Reset Password"):
-        with engine.begin() as conn:
-            result = conn.execute(
-                text("""
-                    SELECT otp FROM password_resets
-                    WHERE email=:email
-                    ORDER BY created_at DESC LIMIT 1
-                """),
-                {"email": email}
-            ).fetchone()
 
-            if result and result[0] == entered_otp:
+        if datetime.utcnow() > st.session_state.otp_expiry:
+            st.error("OTP expired")
+
+        elif entered_otp == st.session_state.reset_otp:
+
+            hashed = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
+
+            with engine.begin() as conn:
                 conn.execute(
                     text("""
                         UPDATE users
-                        SET password_hash=:password
-                        WHERE email=:email
+                        SET password = :password
+                        WHERE email = :email
                     """),
                     {
-                        "email": email,
-                        "password": hash_password(new_pass)
+                        "password": hashed,
+                        "email": st.session_state.reset_email
                     }
                 )
-                st.success("Password updated")
-            else:
-                st.error("Invalid OTP")
 
-# ---------------------------
-# ROUTING
-# ---------------------------
-if not st.session_state.token:
-    menu = st.radio("Select Option", ["Login", "Register", "Forgot Password"])
-    if menu == "Login":
-        login()
-    elif menu == "Register":
-        register()
-    else:
-        forgot_password()
-    st.stop()
+            st.success("Password reset successful")
+            del st.session_state.reset_otp
 
-# ---------------------------
-# TOKEN DECODE
-# ---------------------------
-user_data = decode_token(st.session_state.token)
+        else:
+            st.error("Invalid OTP")
 
-if not user_data:
-    st.session_state.token = None
-    st.error("Session expired")
-    st.stop()
+# -------------------------
+# LOGOUT
+# -------------------------
 
-username = user_data["username"]
-role = user_data["role"]
+if st.session_state.logged_in:
+    st.success(f"Logged in as {st.session_state.user_email}")
 
-st.sidebar.success(f"Logged in: {username} ({role})")
-
-if st.sidebar.button("Logout"):
-    st.session_state.token = None
-    st.rerun()
-
-# ---------------------------
-# LOAD MODEL
-# ---------------------------
-@st.cache_resource
-def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
-
-model = load_model()
-
-# ---------------------------
-# PDF SECTION
-# ---------------------------
-st.subheader("Upload PDF")
-file = st.file_uploader("Upload", type="pdf")
-
-if file:
-    reader = PdfReader(file)
-    text_content = ""
-
-    for page in reader.pages:
-        t = page.extract_text()
-        if t:
-            text_content += t
-
-    chunks = [text_content[i:i+500] for i in range(0, len(text_content), 500)]
-
-    if st.button("Index"):
-        with engine.begin() as conn:
-            for chunk in chunks:
-                emb = model.encode(chunk).tolist()
-                vector_str = "[" + ",".join(map(str, emb)) + "]"
-
-                conn.execute(
-                    text("""
-                        INSERT INTO documents
-                        (username, content, embedding_vector)
-                        VALUES (:u, :c, CAST(:e AS vector))
-                    """),
-                    {"u": username, "c": chunk, "e": vector_str}
-                )
-
-        st.success("Indexed")
-
-# ---------------------------
-# SEARCH
-# ---------------------------
-st.subheader("Search")
-query = st.text_input("Ask question")
-
-if st.button("Search") and query:
-    emb = model.encode(query).tolist()
-    vector_str = "[" + ",".join(map(str, emb)) + "]"
-
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT content
-                FROM documents
-                WHERE username=:u
-                ORDER BY embedding_vector <=> CAST(:q AS vector)
-                LIMIT 3
-            """),
-            {"u": username, "q": vector_str}
-        ).fetchall()
-
-    for r in rows:
-        st.write("•", r[0])
-
-# ---------------------------
-# ADMIN PANEL
-# ---------------------------
-if role == "admin":
-    st.divider()
-    st.subheader("Admin Panel")
-
-    with engine.connect() as conn:
-        total_users = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
-        total_docs = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar()
-
-    st.write("Total Users:", total_users)
-    st.write("Total Documents:", total_docs)
-
-# ---------------------------
-# ANALYTICS
-# ---------------------------
-st.sidebar.divider()
-with engine.connect() as conn:
-    user_docs = conn.execute(
-        text("SELECT COUNT(*) FROM documents WHERE username=:u"),
-        {"u": username}
-    ).scalar()
-
-st.sidebar.write("Your Indexed Docs:", user_docs)
+    if st.button("Logout"):
+        st.session_state.logged_in = False
+        st.rerun()
