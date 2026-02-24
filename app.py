@@ -4,6 +4,9 @@ import smtplib
 import bcrypt
 import numpy as np
 import re
+import threading
+import matplotlib.pyplot as plt
+
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
@@ -14,7 +17,26 @@ from sentence_transformers import SentenceTransformer
 # CONFIG
 # ---------------------------------------------------
 
-st.set_page_config(page_title="AI PDF SaaS", layout="wide")
+st.set_page_config(page_title="AI PDF SaaS Platform", layout="wide")
+
+# PREMIUM DARK UI
+st.markdown("""
+<style>
+body {
+    background-color: #0e1117;
+    color: white;
+}
+.stButton>button {
+    background: linear-gradient(90deg,#2563eb,#7c3aed);
+    color: white;
+    border-radius: 12px;
+    padding: 0.5em 1em;
+}
+section[data-testid="stSidebar"] {
+    background-color: #111827;
+}
+</style>
+""", unsafe_allow_html=True)
 
 DATABASE_URL = st.secrets["DATABASE_URL"]
 engine = create_engine(DATABASE_URL)
@@ -35,7 +57,8 @@ with engine.begin() as conn:
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE,
             password TEXT,
-            plan TEXT DEFAULT 'free'
+            role TEXT DEFAULT 'user',
+            subscription_status TEXT DEFAULT 'free'
         );
     """))
 
@@ -51,7 +74,7 @@ with engine.begin() as conn:
     """))
 
 # ---------------------------------------------------
-# EMAIL OTP FUNCTION
+# EMAIL OTP
 # ---------------------------------------------------
 
 def send_otp_email(to_email, otp):
@@ -85,7 +108,7 @@ if "logged_in" not in st.session_state:
 
 if not st.session_state.logged_in:
 
-    st.title("🔐 AI PDF Platform")
+    st.title("🔐 AI PDF SaaS Platform")
 
     tab1, tab2 = st.tabs(["Login", "Register"])
 
@@ -95,6 +118,7 @@ if not st.session_state.logged_in:
         password = st.text_input("Password", type="password")
 
         if st.button("Login"):
+
             with engine.connect() as conn:
                 result = conn.execute(
                     text("SELECT password FROM users WHERE email=:e"),
@@ -102,8 +126,18 @@ if not st.session_state.logged_in:
                 ).fetchone()
 
             if result and bcrypt.checkpw(password.encode(), result[0].encode()):
+
+                with engine.connect() as conn:
+                    user_data = conn.execute(
+                        text("SELECT role, subscription_status FROM users WHERE email=:e"),
+                        {"e": email}
+                    ).fetchone()
+
                 st.session_state.logged_in = True
                 st.session_state.user_email = email
+                st.session_state.role = user_data[0]
+                st.session_state.plan = user_data[1]
+
                 st.rerun()
             else:
                 st.error("Invalid credentials")
@@ -118,7 +152,10 @@ if not st.session_state.logged_in:
             try:
                 with engine.begin() as conn:
                     conn.execute(
-                        text("INSERT INTO users (email,password) VALUES (:e,:p)"),
+                        text("""
+                            INSERT INTO users (email,password)
+                            VALUES (:e,:p)
+                        """),
                         {"e": reg_email, "p": hashed}
                     )
                 st.success("Registered successfully")
@@ -127,6 +164,7 @@ if not st.session_state.logged_in:
 
     # FORGOT PASSWORD
     st.subheader("Forgot Password")
+
     forgot_email = st.text_input("Enter registered email")
 
     if st.button("Send OTP"):
@@ -164,14 +202,62 @@ if not st.session_state.logged_in:
 else:
 
     st.sidebar.success(f"Logged in as {st.session_state.user_email}")
+    st.sidebar.write(f"Role: {st.session_state.role}")
+    st.sidebar.write(f"Plan: {st.session_state.plan}")
 
-    # LOGOUT
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.rerun()
 
     # ---------------------------------------------------
-    # ANALYTICS
+    # ADMIN PANEL
+    # ---------------------------------------------------
+
+    if st.session_state.role == "admin":
+
+        st.header("🛠 Admin Dashboard")
+
+        with engine.connect() as conn:
+            total_users = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+            total_chunks = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar()
+
+        col1, col2 = st.columns(2)
+        col1.metric("Total Users", total_users)
+        col2.metric("Total Chunks", total_chunks)
+
+        st.subheader("👥 Users")
+
+        with engine.connect() as conn:
+            users = conn.execute(
+                text("SELECT email, role, subscription_status FROM users")
+            ).fetchall()
+
+        for u in users:
+            st.write(f"{u[0]} | Role: {u[1]} | Plan: {u[2]}")
+
+        st.subheader("📊 Usage Chart")
+
+        with engine.connect() as conn:
+            file_counts = conn.execute(text("""
+                SELECT user_email, COUNT(DISTINCT file_name)
+                FROM documents
+                GROUP BY user_email
+            """)).fetchall()
+
+        if file_counts:
+            emails = [row[0] for row in file_counts]
+            counts = [row[1] for row in file_counts]
+
+            fig = plt.figure()
+            plt.bar(emails, counts)
+            plt.xticks(rotation=45)
+            plt.title("Files per User")
+            st.pyplot(fig)
+        else:
+            st.info("No usage data yet.")
+
+    # ---------------------------------------------------
+    # USER ANALYTICS
     # ---------------------------------------------------
 
     with engine.connect() as conn:
@@ -185,9 +271,8 @@ else:
             {"e": st.session_state.user_email}
         ).scalar()
 
-    st.sidebar.subheader("📊 Analytics")
-    st.sidebar.metric("Total Files", total_files)
-    st.sidebar.metric("Total Chunks", total_chunks)
+    st.sidebar.metric("Your Files", total_files)
+    st.sidebar.metric("Your Chunks", total_chunks)
 
     # ---------------------------------------------------
     # DELETE FILE
@@ -207,7 +292,10 @@ else:
         if st.sidebar.button("Delete Selected File"):
             with engine.begin() as conn:
                 conn.execute(
-                    text("DELETE FROM documents WHERE user_email=:e AND file_name=:f"),
+                    text("""
+                        DELETE FROM documents
+                        WHERE user_email=:e AND file_name=:f
+                    """),
                     {"e": st.session_state.user_email, "f": selected_file}
                 )
             st.sidebar.success("File deleted")
@@ -223,8 +311,7 @@ else:
 
     if uploaded_file:
 
-        # FREE PLAN LIMIT (3 PDFs)
-        if total_files >= 3:
+        if st.session_state.plan == "free" and total_files >= 3:
             st.warning("Free plan allows only 3 PDFs")
             st.stop()
 
@@ -244,27 +331,31 @@ else:
 
         chunks = create_chunks(text_content)
 
-        if st.button("Index Document"):
-
+        def background_index(chunks, file_name):
             embeddings = model.encode(chunks, batch_size=32)
-
             with engine.begin() as conn:
                 for chunk, emb in zip(chunks, embeddings):
                     conn.execute(
                         text("""
-                            INSERT INTO documents 
+                            INSERT INTO documents
                             (user_email,file_name,content,embedding)
                             VALUES (:e,:f,:c,:emb)
                         """),
                         {
                             "e": st.session_state.user_email,
-                            "f": uploaded_file.name,
+                            "f": file_name,
                             "c": chunk,
                             "emb": emb.tolist()
                         }
                     )
 
-            st.success("Document Indexed Successfully")
+        if st.button("Index Document"):
+            thread = threading.Thread(
+                target=background_index,
+                args=(chunks, uploaded_file.name)
+            )
+            thread.start()
+            st.success("Indexing started in background")
 
     # ---------------------------------------------------
     # SEARCH
@@ -302,7 +393,7 @@ else:
             for r in results:
                 highlighted = highlight(r[0], query)
                 st.markdown(f"""
-                <div style='padding:12px;border:1px solid #ddd;
+                <div style='padding:12px;border:1px solid #444;
                 border-radius:10px;margin-bottom:10px'>
                 {highlighted}
                 </div>
