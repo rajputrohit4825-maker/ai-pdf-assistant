@@ -3,24 +3,21 @@ import random
 import smtplib
 import bcrypt
 import numpy as np
+import re
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 
-# -----------------------------------
+# ---------------------------------------------------
 # CONFIG
-# -----------------------------------
+# ---------------------------------------------------
 
-st.set_page_config(page_title="AI PDF Intelligence", layout="wide")
+st.set_page_config(page_title="AI PDF SaaS", layout="wide")
 
 DATABASE_URL = st.secrets["DATABASE_URL"]
 engine = create_engine(DATABASE_URL)
-
-# -----------------------------------
-# LOAD MODEL (Cached = Fast)
-# -----------------------------------
 
 @st.cache_resource
 def load_model():
@@ -28,32 +25,17 @@ def load_model():
 
 model = load_model()
 
-# -----------------------------------
-# STYLING
-# -----------------------------------
-
-st.markdown("""
-<style>
-.stButton>button {
-    background-color: #2563eb;
-    color: white;
-    border-radius: 8px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown("<h1 style='text-align:center;'>🚀 AI PDF Intelligence Platform</h1>", unsafe_allow_html=True)
-
-# -----------------------------------
-# CREATE TABLES
-# -----------------------------------
+# ---------------------------------------------------
+# DATABASE TABLES
+# ---------------------------------------------------
 
 with engine.begin() as conn:
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE,
-            password TEXT
+            password TEXT,
+            plan TEXT DEFAULT 'free'
         );
     """))
 
@@ -61,14 +43,16 @@ with engine.begin() as conn:
         CREATE TABLE IF NOT EXISTS documents (
             id SERIAL PRIMARY KEY,
             user_email TEXT,
+            file_name TEXT,
             content TEXT,
-            embedding vector(384)
+            embedding vector(384),
+            created_at TIMESTAMP DEFAULT NOW()
         );
     """))
 
-# -----------------------------------
-# EMAIL FUNCTION
-# -----------------------------------
+# ---------------------------------------------------
+# EMAIL OTP FUNCTION
+# ---------------------------------------------------
 
 def send_otp_email(to_email, otp):
     try:
@@ -78,25 +62,30 @@ def send_otp_email(to_email, otp):
         msg["To"] = to_email
 
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(st.secrets["EMAIL_ADDRESS"], st.secrets["EMAIL_PASSWORD"])
+            server.login(
+                st.secrets["EMAIL_ADDRESS"],
+                st.secrets["EMAIL_PASSWORD"]
+            )
             server.send_message(msg)
 
         return True
     except:
         return False
 
-# -----------------------------------
+# ---------------------------------------------------
 # SESSION INIT
-# -----------------------------------
+# ---------------------------------------------------
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
-# -----------------------------------
+# ---------------------------------------------------
 # AUTH SECTION
-# -----------------------------------
+# ---------------------------------------------------
 
 if not st.session_state.logged_in:
+
+    st.title("🔐 AI PDF Platform")
 
     tab1, tab2 = st.tabs(["Login", "Register"])
 
@@ -129,7 +118,7 @@ if not st.session_state.logged_in:
             try:
                 with engine.begin() as conn:
                     conn.execute(
-                        text("INSERT INTO users (email, password) VALUES (:e,:p)"),
+                        text("INSERT INTO users (email,password) VALUES (:e,:p)"),
                         {"e": reg_email, "p": hashed}
                     )
                 st.success("Registered successfully")
@@ -147,7 +136,7 @@ if not st.session_state.logged_in:
         st.session_state.otp_expiry = datetime.utcnow() + timedelta(minutes=10)
 
         if send_otp_email(forgot_email, otp):
-            st.success("OTP sent")
+            st.success("OTP sent to email")
 
     if "reset_otp" in st.session_state:
         entered = st.text_input("Enter OTP")
@@ -168,40 +157,79 @@ if not st.session_state.logged_in:
             else:
                 st.error("Invalid OTP")
 
-# -----------------------------------
-# MAIN APP (AFTER LOGIN)
-# -----------------------------------
+# ---------------------------------------------------
+# MAIN APP AFTER LOGIN
+# ---------------------------------------------------
 
 else:
 
     st.sidebar.success(f"Logged in as {st.session_state.user_email}")
 
+    # LOGOUT
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.rerun()
 
-    # Dashboard Stats
+    # ---------------------------------------------------
+    # ANALYTICS
+    # ---------------------------------------------------
+
     with engine.connect() as conn:
-        count = conn.execute(
+        total_files = conn.execute(
+            text("SELECT COUNT(DISTINCT file_name) FROM documents WHERE user_email=:e"),
+            {"e": st.session_state.user_email}
+        ).scalar()
+
+        total_chunks = conn.execute(
             text("SELECT COUNT(*) FROM documents WHERE user_email=:e"),
             {"e": st.session_state.user_email}
         ).scalar()
 
-    st.sidebar.metric("Indexed Chunks", count)
+    st.sidebar.subheader("📊 Analytics")
+    st.sidebar.metric("Total Files", total_files)
+    st.sidebar.metric("Total Chunks", total_chunks)
 
-    # -----------------------------------
+    # ---------------------------------------------------
+    # DELETE FILE
+    # ---------------------------------------------------
+
+    with engine.connect() as conn:
+        files = conn.execute(
+            text("SELECT DISTINCT file_name FROM documents WHERE user_email=:e"),
+            {"e": st.session_state.user_email}
+        ).fetchall()
+
+    file_list = [f[0] for f in files]
+
+    if file_list:
+        selected_file = st.sidebar.selectbox("Your Files", file_list)
+
+        if st.sidebar.button("Delete Selected File"):
+            with engine.begin() as conn:
+                conn.execute(
+                    text("DELETE FROM documents WHERE user_email=:e AND file_name=:f"),
+                    {"e": st.session_state.user_email, "f": selected_file}
+                )
+            st.sidebar.success("File deleted")
+            st.rerun()
+
+    # ---------------------------------------------------
     # PDF UPLOAD
-    # -----------------------------------
+    # ---------------------------------------------------
 
-    st.subheader("Upload PDF")
+    st.header("📄 Upload PDF")
 
     uploaded_file = st.file_uploader("Choose PDF", type="pdf")
 
     if uploaded_file:
 
+        # FREE PLAN LIMIT (3 PDFs)
+        if total_files >= 3:
+            st.warning("Free plan allows only 3 PDFs")
+            st.stop()
+
         reader = PdfReader(uploaded_file)
         text_content = ""
-
         for page in reader.pages:
             text_content += page.extract_text() or ""
 
@@ -224,11 +252,13 @@ else:
                 for chunk, emb in zip(chunks, embeddings):
                     conn.execute(
                         text("""
-                            INSERT INTO documents (user_email, content, embedding)
-                            VALUES (:e, :c, :emb)
+                            INSERT INTO documents 
+                            (user_email,file_name,content,embedding)
+                            VALUES (:e,:f,:c,:emb)
                         """),
                         {
                             "e": st.session_state.user_email,
+                            "f": uploaded_file.name,
                             "c": chunk,
                             "emb": emb.tolist()
                         }
@@ -236,13 +266,19 @@ else:
 
             st.success("Document Indexed Successfully")
 
-    # -----------------------------------
+    # ---------------------------------------------------
     # SEARCH
-    # -----------------------------------
+    # ---------------------------------------------------
 
-    st.subheader("Ask Question")
+    st.header("🔎 Ask Question")
 
     query = st.text_input("Enter your question")
+
+    def highlight(text, query):
+        words = query.split()
+        for w in words:
+            text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
+        return text
 
     if st.button("Search"):
 
@@ -251,8 +287,7 @@ else:
         with engine.connect() as conn:
             results = conn.execute(
                 text("""
-                    SELECT content
-                    FROM documents
+                    SELECT content FROM documents
                     WHERE user_email=:e
                     ORDER BY embedding <=> :emb
                     LIMIT 5
@@ -265,9 +300,11 @@ else:
 
         if results:
             for r in results:
+                highlighted = highlight(r[0], query)
                 st.markdown(f"""
-                <div style='padding:10px;border:1px solid #ddd;border-radius:8px;margin-bottom:10px'>
-                {r[0]}
+                <div style='padding:12px;border:1px solid #ddd;
+                border-radius:10px;margin-bottom:10px'>
+                {highlighted}
                 </div>
                 """, unsafe_allow_html=True)
         else:
