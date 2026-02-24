@@ -24,7 +24,7 @@ except Exception as e:
     st.error(f"Database Connection Failed: {e}")
 
 # -----------------------------------
-# LOGIN SYSTEM (STABLE)
+# LOGIN SYSTEM
 # -----------------------------------
 if "username" not in st.session_state:
     st.session_state["username"] = ""
@@ -36,11 +36,9 @@ if not st.session_state["username"]:
     if st.button("Login"):
         if username_input.strip():
             st.session_state["username"] = username_input.strip()
-            st.success("Login Successful ✅")
             st.rerun()
         else:
             st.error("Username cannot be empty")
-
     st.stop()
 
 st.sidebar.success(f"Logged in as: {st.session_state['username']}")
@@ -55,7 +53,7 @@ def load_model():
 model = load_model()
 
 # -----------------------------------
-# PDF UPLOAD & INDEX
+# PDF UPLOAD & INDEXING
 # -----------------------------------
 st.subheader("📂 Upload PDF")
 uploaded_file = st.file_uploader("Upload your PDF", type="pdf")
@@ -72,12 +70,20 @@ if uploaded_file:
     if not text_content.strip():
         st.error("No readable text found in PDF ❌")
     else:
-        st.success("PDF processed successfully ✅")
+        st.success("PDF text extracted ✅")
 
-        sentences = text_content.split(". ")
-        sentences = [s.strip() for s in sentences if len(s.strip()) > 50]
+        # 🔥 500-character chunking (guaranteed insert)
+        sentences = [
+            text_content[i:i+500]
+            for i in range(0, len(text_content), 500)
+        ]
+
+        st.write(f"Chunks created: {len(sentences)}")
 
         if st.button("Index Document to Database"):
+
+            inserted_count = 0
+
             with engine.begin() as conn:
                 for sentence in sentences:
                     embedding = model.encode(sentence).tolist()
@@ -98,7 +104,9 @@ if uploaded_file:
                         }
                     )
 
-            st.success("Document Indexed Successfully ✅")
+                    inserted_count += 1
+
+            st.success(f"Inserted {inserted_count} chunks successfully ✅")
 
 # -----------------------------------
 # SEARCH SECTION
@@ -153,7 +161,7 @@ with engine.connect() as conn:
 st.sidebar.write(f"Indexed Chunks: {count}")
 
 # -----------------------------------
-# LOGOUT BUTTON
+# LOGOUT
 # -----------------------------------
 if st.sidebar.button("Logout"):
     st.session_state["username"] = ""
