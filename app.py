@@ -2,10 +2,10 @@ import streamlit as st
 import random
 import smtplib
 import bcrypt
-import numpy as np
 import re
 import threading
 import matplotlib.pyplot as plt
+import numpy as np
 
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
@@ -13,20 +13,20 @@ from sqlalchemy import create_engine, text
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 
-# ===================================================
+# ---------------------------------------------------
 # CONFIG
-# ===================================================
+# ---------------------------------------------------
 
-st.set_page_config(page_title="AI PDF SaaS Platform", layout="wide")
+st.set_page_config(page_title="AI PDF SaaS", layout="wide")
 
 st.markdown("""
 <style>
 body {background-color:#0e1117;color:white;}
 .stButton>button {
-    background:linear-gradient(90deg,#2563eb,#7c3aed);
-    color:white;border-radius:12px;padding:0.5em 1em;
+    background: linear-gradient(90deg,#2563eb,#7c3aed);
+    color:white;border-radius:10px;
 }
-section[data-testid="stSidebar"] {background-color:#111827;}
+section[data-testid="stSidebar"] {background:#111827;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -39,17 +39,13 @@ def load_model():
 
 model = load_model()
 
-# ===================================================
-# DATABASE TABLES
-# ===================================================
+# ---------------------------------------------------
+# DB TABLES
+# ---------------------------------------------------
 
 with engine.begin() as conn:
     conn.execute(text("""
-        CREATE EXTENSION IF NOT EXISTS vector;
-    """))
-
-    conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE IF NOT EXISTS users(
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE,
             password TEXT,
@@ -59,7 +55,7 @@ with engine.begin() as conn:
     """))
 
     conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS documents (
+        CREATE TABLE IF NOT EXISTS documents(
             id SERIAL PRIMARY KEY,
             user_email TEXT,
             file_name TEXT,
@@ -69,24 +65,14 @@ with engine.begin() as conn:
         );
     """))
 
-# ===================================================
-# SESSION INIT
-# ===================================================
-
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-# ===================================================
-# EMAIL OTP
-# ===================================================
+# ---------------------------------------------------
+# EMAIL
+# ---------------------------------------------------
 
 def send_otp_email(to_email, otp):
     try:
-        msg = MIMEText(f"Your OTP is: {otp}\nValid for 10 minutes.")
-        msg["Subject"] = "Password Reset OTP"
+        msg = MIMEText(f"Your OTP is {otp}")
+        msg["Subject"] = "Password Reset"
         msg["From"] = st.secrets["EMAIL_ADDRESS"]
         msg["To"] = to_email
 
@@ -96,13 +82,24 @@ def send_otp_email(to_email, otp):
                 st.secrets["EMAIL_PASSWORD"]
             )
             server.send_message(msg)
+
         return True
     except:
         return False
 
-# ===================================================
-# AUTH SECTION
-# ===================================================
+# ---------------------------------------------------
+# SESSION INIT
+# ---------------------------------------------------
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# ---------------------------------------------------
+# AUTH
+# ---------------------------------------------------
 
 if not st.session_state.logged_in:
 
@@ -112,61 +109,61 @@ if not st.session_state.logged_in:
 
     # LOGIN
     with tab1:
-        email = st.text_input("Email")
-        password = st.text_input("Password", type="password")
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("Password", type="password", key="login_password")
 
-        if st.button("Login"):
+        if st.button("Login", key="login_btn"):
             with engine.connect() as conn:
-                result = conn.execute(
+                user = conn.execute(
                     text("SELECT password, role, subscription_status FROM users WHERE email=:e"),
                     {"e": email}
                 ).fetchone()
 
-            if result and bcrypt.checkpw(password.encode(), result[0].encode()):
+            if user and bcrypt.checkpw(password.encode(), user[0].encode()):
                 st.session_state.logged_in = True
                 st.session_state.user_email = email
-                st.session_state.role = result[1]
-                st.session_state.plan = result[2]
+                st.session_state.role = user[1]
+                st.session_state.plan = user[2]
                 st.rerun()
             else:
                 st.error("Invalid credentials")
 
     # REGISTER
     with tab2:
-        reg_email = st.text_input("Email", key="reg")
-        reg_pass = st.text_input("Password", type="password")
+        r_email = st.text_input("Email", key="reg_email")
+        r_pass = st.text_input("Password", type="password", key="reg_pass")
 
-        if st.button("Register"):
-            hashed = bcrypt.hashpw(reg_pass.encode(), bcrypt.gensalt()).decode()
+        if st.button("Register", key="reg_btn"):
+            hashed = bcrypt.hashpw(r_pass.encode(), bcrypt.gensalt()).decode()
             try:
                 with engine.begin() as conn:
                     conn.execute(
-                        text("INSERT INTO users (email,password) VALUES (:e,:p)"),
-                        {"e": reg_email, "p": hashed}
+                        text("INSERT INTO users(email,password) VALUES(:e,:p)"),
+                        {"e": r_email, "p": hashed}
                     )
                 st.success("Registered successfully")
             except:
                 st.error("Email already exists")
 
-    # FORGOT PASSWORD
+    # FORGOT
     with tab3:
-        forgot_email = st.text_input("Enter registered email")
+        f_email = st.text_input("Enter registered email", key="forgot_email")
 
-        if st.button("Send OTP"):
+        if st.button("Send OTP", key="otp_btn"):
             otp = str(random.randint(100000, 999999))
             st.session_state.reset_otp = otp
-            st.session_state.reset_email = forgot_email
-            st.session_state.otp_expiry = datetime.utcnow() + timedelta(minutes=10)
+            st.session_state.reset_email = f_email
+            st.session_state.expiry = datetime.utcnow() + timedelta(minutes=10)
 
-            if send_otp_email(forgot_email, otp):
+            if send_otp_email(f_email, otp):
                 st.success("OTP sent")
 
         if "reset_otp" in st.session_state:
-            entered = st.text_input("Enter OTP")
-            new_pass = st.text_input("New Password", type="password")
+            entered = st.text_input("Enter OTP", key="otp_input")
+            new_pass = st.text_input("New Password", type="password", key="new_pass")
 
-            if st.button("Reset Password"):
-                if datetime.utcnow() > st.session_state.otp_expiry:
+            if st.button("Reset Password", key="reset_btn"):
+                if datetime.utcnow() > st.session_state.expiry:
                     st.error("OTP expired")
                 elif entered == st.session_state.reset_otp:
                     hashed = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt()).decode()
@@ -175,14 +172,14 @@ if not st.session_state.logged_in:
                             text("UPDATE users SET password=:p WHERE email=:e"),
                             {"p": hashed, "e": st.session_state.reset_email}
                         )
-                    st.success("Password updated")
+                    st.success("Password reset successful")
                     del st.session_state.reset_otp
                 else:
                     st.error("Invalid OTP")
 
-# ===================================================
-# MAIN APP AFTER LOGIN
-# ===================================================
+# ---------------------------------------------------
+# MAIN APP
+# ---------------------------------------------------
 
 else:
 
@@ -194,48 +191,44 @@ else:
         st.session_state.logged_in = False
         st.rerun()
 
-    # ================= ADMIN =================
-
+    # ADMIN
     if st.session_state.role == "admin":
-
         st.header("🛠 Admin Dashboard")
 
         with engine.connect() as conn:
             total_users = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
-            total_chunks = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar()
+            total_docs = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar()
 
-        col1, col2 = st.columns(2)
-        col1.metric("Total Users", total_users)
-        col2.metric("Total Chunks", total_chunks)
+        c1, c2 = st.columns(2)
+        c1.metric("Total Users", total_users)
+        c2.metric("Total Chunks", total_docs)
+
+        st.subheader("Usage Chart")
 
         with engine.connect() as conn:
-            file_counts = conn.execute(text("""
-                SELECT user_email, COUNT(DISTINCT file_name)
-                FROM documents
+            data = conn.execute(text("""
+                SELECT user_email, COUNT(*) FROM documents
                 GROUP BY user_email
             """)).fetchall()
 
-        if file_counts:
-            emails = [r[0] for r in file_counts]
-            counts = [r[1] for r in file_counts]
+        if data:
+            users = [d[0] for d in data]
+            counts = [d[1] for d in data]
             fig = plt.figure()
-            plt.bar(emails, counts)
+            plt.bar(users, counts)
             plt.xticks(rotation=45)
-            plt.title("Files per User")
             st.pyplot(fig)
 
-    # ================= USER ANALYTICS =================
-
+    # USER ANALYTICS
     with engine.connect() as conn:
         total_files = conn.execute(
             text("SELECT COUNT(DISTINCT file_name) FROM documents WHERE user_email=:e"),
             {"e": st.session_state.user_email}
         ).scalar()
 
-    st.sidebar.metric("Your Files", total_files)
+    st.sidebar.metric("Your PDFs", total_files)
 
-    # ================= DELETE FILE =================
-
+    # FILE LIST
     with engine.connect() as conn:
         files = conn.execute(
             text("SELECT DISTINCT file_name FROM documents WHERE user_email=:e"),
@@ -245,71 +238,62 @@ else:
     file_list = [f[0] for f in files]
 
     if file_list:
-        selected_file = st.sidebar.selectbox("Your Files", file_list)
-        if st.sidebar.button("Delete Selected File"):
+        selected = st.sidebar.selectbox("Your Files", file_list)
+
+        if st.sidebar.button("Delete File"):
             with engine.begin() as conn:
                 conn.execute(
                     text("DELETE FROM documents WHERE user_email=:e AND file_name=:f"),
-                    {"e": st.session_state.user_email, "f": selected_file}
+                    {"e": st.session_state.user_email, "f": selected}
                 )
-            st.sidebar.success("Deleted")
+            st.success("Deleted")
             st.rerun()
 
-    # ================= UPLOAD =================
-
+    # UPLOAD
     st.header("📄 Upload PDF")
 
-    uploaded_file = st.file_uploader("Choose PDF", type="pdf")
+    uploaded = st.file_uploader("Choose PDF", type="pdf")
 
-    if uploaded_file:
-
+    if uploaded:
         if st.session_state.plan == "free" and total_files >= 3:
-            st.warning("Free plan limit reached (3 PDFs)")
+            st.warning("Free plan limit reached")
             st.stop()
 
-        reader = PdfReader(uploaded_file)
-        text_content = ""
-        for page in reader.pages:
-            text_content += page.extract_text() or ""
+        reader = PdfReader(uploaded)
+        text_data = "".join(page.extract_text() or "" for page in reader.pages)
 
-        def create_chunks(text, size=700, overlap=100):
+        def chunk_text(text, size=700, overlap=100):
             chunks = []
-            start = 0
-            while start < len(text):
-                end = start + size
-                chunks.append(text[start:end])
-                start += size - overlap
+            i = 0
+            while i < len(text):
+                chunks.append(text[i:i+size])
+                i += size - overlap
             return chunks
 
-        chunks = create_chunks(text_content)
+        chunks = chunk_text(text_data)
 
-        def background_index():
+        def index_bg():
             embeddings = model.encode(chunks, batch_size=32)
             with engine.begin() as conn:
                 for chunk, emb in zip(chunks, embeddings):
                     conn.execute(
                         text("""
-                            INSERT INTO documents
-                            (user_email,file_name,content,embedding)
-                            VALUES (:e,:f,:c,:emb)
+                            INSERT INTO documents(user_email,file_name,content,embedding)
+                            VALUES(:e,:f,:c,:emb)
                         """),
                         {
                             "e": st.session_state.user_email,
-                            "f": uploaded_file.name,
+                            "f": uploaded.name,
                             "c": chunk,
                             "emb": emb.tolist()
                         }
                     )
 
         if st.button("Index Document"):
-            thread = threading.Thread(target=background_index)
-            thread.start()
+            threading.Thread(target=index_bg).start()
             st.success("Indexing started")
 
-    # ================= SEARCH =================
-
-    st.header("🔎 Ask Question")
-
+    # CHAT DISPLAY
     st.subheader("💬 Conversation")
 
     for role, msg in st.session_state.chat_history:
@@ -318,19 +302,21 @@ else:
         else:
             st.markdown(f"**🤖 AI:** {msg}")
 
-    query = st.text_input("Enter your question")
+    # SEARCH
+    st.header("🔎 Ask Question")
 
-    def highlight(text, query):
-        words = query.split()
-        for w in words:
+    query = st.text_input("Enter question", key="query_input")
+
+    def highlight(text, q):
+        for w in q.split():
             text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
         return text
 
-    if st.button("Search") and query:
+    if st.button("Search", key="search_btn"):
 
         st.session_state.chat_history.append(("User", query))
 
-        query_embedding = model.encode([query])[0]
+        q_emb = model.encode([query])[0]
 
         with engine.connect() as conn:
             results = conn.execute(
@@ -338,22 +324,20 @@ else:
                     SELECT content FROM documents
                     WHERE user_email=:e
                     ORDER BY embedding <=> :emb
-                    LIMIT 5
+                    LIMIT 3
                 """),
-                {"e": st.session_state.user_email,
-                 "emb": query_embedding.tolist()}
+                {
+                    "e": st.session_state.user_email,
+                    "emb": q_emb.tolist()
+                }
             ).fetchall()
 
         if results:
-            st.session_state.chat_history.append(("AI", results[0][0]))
+            answer = results[0][0]
+            st.session_state.chat_history.append(("AI", answer))
+
             for r in results:
-                highlighted = highlight(r[0], query)
-                st.markdown(f"""
-                <div style='padding:12px;border:1px solid #444;
-                border-radius:10px;margin-bottom:10px'>
-                {highlighted}
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(highlight(r[0], query), unsafe_allow_html=True)
         else:
             st.session_state.chat_history.append(("AI", "No relevant answer found"))
             st.warning("No relevant answer found")
