@@ -2,10 +2,10 @@ import streamlit as st
 import random
 import smtplib
 import bcrypt
+import numpy as np
 import re
 import threading
 import matplotlib.pyplot as plt
-import numpy as np
 
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
@@ -17,17 +17,16 @@ from sentence_transformers import SentenceTransformer
 # CONFIG
 # ---------------------------------------------------
 
-st.set_page_config(page_title="AI PDF SaaS", layout="wide")
+st.set_page_config(page_title="AI PDF SaaS Platform", layout="wide")
 
 st.markdown("""
 <style>
 body {background-color:#0e1117;color:white;}
 .stButton>button {
     background: linear-gradient(90deg,#2563eb,#7c3aed);
-    color:white;border-radius:10px;
+    color:white;border-radius:12px;padding:0.5em 1em;
 }
-section[data-testid="stSidebar"] {background:#111827;}
-mark {background-color:#facc15;color:black;padding:2px;border-radius:4px;}
+section[data-testid="stSidebar"] {background-color:#111827;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -41,12 +40,14 @@ def load_model():
 model = load_model()
 
 # ---------------------------------------------------
-# DB TABLES
+# DATABASE TABLES
 # ---------------------------------------------------
 
 with engine.begin() as conn:
+    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+
     conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS users(
+        CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE,
             password TEXT,
@@ -56,7 +57,7 @@ with engine.begin() as conn:
     """))
 
     conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS documents(
+        CREATE TABLE IF NOT EXISTS documents (
             id SERIAL PRIMARY KEY,
             user_email TEXT,
             file_name TEXT,
@@ -67,12 +68,12 @@ with engine.begin() as conn:
     """))
 
 # ---------------------------------------------------
-# EMAIL
+# EMAIL OTP
 # ---------------------------------------------------
 
 def send_otp_email(to_email, otp):
     try:
-        msg = MIMEText(f"Your OTP is {otp}. Valid for 10 minutes.")
+        msg = MIMEText(f"Your OTP is: {otp}\nValid for 10 minutes.")
         msg["Subject"] = "Password Reset OTP"
         msg["From"] = st.secrets["EMAIL_ADDRESS"]
         msg["To"] = to_email
@@ -83,7 +84,6 @@ def send_otp_email(to_email, otp):
                 st.secrets["EMAIL_PASSWORD"]
             )
             server.send_message(msg)
-
         return True
     except:
         return False
@@ -98,8 +98,8 @@ if "logged_in" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-if "search_timestamps" not in st.session_state:
-    st.session_state.search_timestamps = []
+if "search_count" not in st.session_state:
+    st.session_state.search_count = 0
 
 # ---------------------------------------------------
 # AUTH SECTION
@@ -116,41 +116,44 @@ if not st.session_state.logged_in:
         email = st.text_input("Email", key="login_email")
         password = st.text_input("Password", type="password", key="login_password")
 
-        if st.button("Login", key="login_btn"):
-
+        if st.button("Login"):
             with engine.connect() as conn:
-                user = conn.execute(
+                result = conn.execute(
                     text("SELECT password, role, subscription_status FROM users WHERE email=:e"),
                     {"e": email}
                 ).fetchone()
 
-            if user and bcrypt.checkpw(password.encode(), user[0].encode()):
+            if result and bcrypt.checkpw(password.encode(), result[0].encode()):
                 st.session_state.logged_in = True
                 st.session_state.user_email = email
-                st.session_state.role = user[1]
-                st.session_state.plan = user[2]
+                st.session_state.role = result[1]
+                st.session_state.plan = result[2]
                 st.rerun()
             else:
                 st.error("Invalid credentials")
 
     # REGISTER
     with tab2:
-        r_email = st.text_input("Email", key="reg_email")
-        r_pass = st.text_input("Password", type="password", key="reg_pass")
+        reg_email = st.text_input("Email", key="register_email")
+        reg_pass = st.text_input("Password", type="password", key="register_password")
 
-        if st.button("Register", key="reg_btn"):
+        if st.button("Register"):
 
-            if not r_pass or len(r_pass) < 6:
-                st.warning("Password must be at least 6 characters")
+            if "@" not in reg_email:
+                st.warning("Invalid email")
                 st.stop()
 
-            hashed = bcrypt.hashpw(r_pass.encode(), bcrypt.gensalt()).decode()
+            if len(reg_pass) < 6:
+                st.warning("Password too short")
+                st.stop()
+
+            hashed = bcrypt.hashpw(reg_pass.encode(), bcrypt.gensalt()).decode()
 
             try:
                 with engine.begin() as conn:
                     conn.execute(
-                        text("INSERT INTO users(email,password) VALUES(:e,:p)"),
-                        {"e": r_email, "p": hashed}
+                        text("INSERT INTO users (email,password) VALUES (:e,:p)"),
+                        {"e": reg_email, "p": hashed}
                     )
                 st.success("Registered successfully")
             except:
@@ -158,24 +161,23 @@ if not st.session_state.logged_in:
 
     # FORGOT PASSWORD
     with tab3:
-        f_email = st.text_input("Enter registered email", key="forgot_email")
+        forgot_email = st.text_input("Enter registered email", key="forgot_email")
 
-        if st.button("Send OTP", key="otp_btn"):
+        if st.button("Send OTP"):
             otp = str(random.randint(100000, 999999))
             st.session_state.reset_otp = otp
-            st.session_state.reset_email = f_email
-            st.session_state.expiry = datetime.utcnow() + timedelta(minutes=10)
+            st.session_state.reset_email = forgot_email
+            st.session_state.otp_expiry = datetime.utcnow() + timedelta(minutes=10)
 
-            if send_otp_email(f_email, otp):
+            if send_otp_email(forgot_email, otp):
                 st.success("OTP sent")
 
         if "reset_otp" in st.session_state:
             entered = st.text_input("Enter OTP", key="otp_input")
-            new_pass = st.text_input("New Password", type="password", key="new_pass")
+            new_pass = st.text_input("New Password", type="password", key="new_password")
 
-            if st.button("Reset Password", key="reset_btn"):
-
-                if datetime.utcnow() > st.session_state.expiry:
+            if st.button("Reset Password"):
+                if datetime.utcnow() > st.session_state.otp_expiry:
                     st.error("OTP expired")
                 elif entered == st.session_state.reset_otp:
                     hashed = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt()).decode()
@@ -199,6 +201,19 @@ else:
     st.sidebar.write(f"Role: {st.session_state.role}")
     st.sidebar.write(f"Plan: {st.session_state.plan}")
 
+    # PLAN UI
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("💎 Subscription")
+
+    if st.session_state.plan == "pro":
+        st.sidebar.success("🚀 PRO PLAN ACTIVE")
+        st.sidebar.write("Unlimited PDFs")
+    else:
+        st.sidebar.info("Free Plan")
+        st.sidebar.write("Limit: 3 PDFs")
+        if st.sidebar.button("Upgrade to Pro"):
+            st.sidebar.info("Payment integration coming soon")
+
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.rerun()
@@ -209,38 +224,36 @@ else:
 
         with engine.connect() as conn:
             total_users = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
-            total_docs = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar()
+            total_chunks = conn.execute(text("SELECT COUNT(*) FROM documents")).scalar()
 
-        c1, c2 = st.columns(2)
-        c1.metric("Total Users", total_users)
-        c2.metric("Total Chunks", total_docs)
-
-        st.subheader("Usage Chart")
+        col1, col2 = st.columns(2)
+        col1.metric("Total Users", total_users)
+        col2.metric("Total Chunks", total_chunks)
 
         with engine.connect() as conn:
-            data = conn.execute(text("""
-                SELECT user_email, COUNT(*) FROM documents
-                GROUP BY user_email
+            file_counts = conn.execute(text("""
+                SELECT user_email, COUNT(DISTINCT file_name)
+                FROM documents GROUP BY user_email
             """)).fetchall()
 
-        if data:
-            users = [d[0] for d in data]
-            counts = [d[1] for d in data]
+        if file_counts:
+            emails = [row[0] for row in file_counts]
+            counts = [row[1] for row in file_counts]
             fig = plt.figure()
-            plt.bar(users, counts)
+            plt.bar(emails, counts)
             plt.xticks(rotation=45)
             st.pyplot(fig)
 
-    # USER ANALYTICS
+    # USER STATS
     with engine.connect() as conn:
         total_files = conn.execute(
             text("SELECT COUNT(DISTINCT file_name) FROM documents WHERE user_email=:e"),
             {"e": st.session_state.user_email}
         ).scalar()
 
-    st.sidebar.metric("Your PDFs", total_files)
+    st.sidebar.metric("Your Files", total_files)
 
-    # FILE MANAGEMENT
+    # DELETE FILE
     with engine.connect() as conn:
         files = conn.execute(
             text("SELECT DISTINCT file_name FROM documents WHERE user_email=:e"),
@@ -250,69 +263,78 @@ else:
     file_list = [f[0] for f in files]
 
     if file_list:
-        selected = st.sidebar.selectbox("Your Files", file_list)
-
-        if st.sidebar.button("Delete File"):
+        selected_file = st.sidebar.selectbox("Your Files", file_list)
+        if st.sidebar.button("Delete Selected File"):
             with engine.begin() as conn:
                 conn.execute(
                     text("DELETE FROM documents WHERE user_email=:e AND file_name=:f"),
-                    {"e": st.session_state.user_email, "f": selected}
+                    {"e": st.session_state.user_email, "f": selected_file}
                 )
-            st.success("Deleted")
+            st.sidebar.success("File deleted")
             st.rerun()
 
-    # UPLOAD
+    # PDF UPLOAD
     st.header("📄 Upload PDF")
+    uploaded_file = st.file_uploader("Choose PDF", type="pdf")
 
-    uploaded = st.file_uploader("Choose PDF", type="pdf")
+    if uploaded_file:
 
-    if uploaded:
-
-        if uploaded.size > 10_000_000:
-            st.warning("Maximum file size is 10MB")
+        if uploaded_file.size > 10_000_000:
+            st.warning("Max 10MB allowed")
             st.stop()
+
+        safe_name = re.sub(r"[^a-zA-Z0-9_.-]", "_", uploaded_file.name)
 
         if st.session_state.plan == "free" and total_files >= 3:
-            st.warning("Free plan limit reached")
+            st.warning("Free plan allows only 3 PDFs")
             st.stop()
 
-        reader = PdfReader(uploaded)
-        text_data = "".join(page.extract_text() or "" for page in reader.pages)
+        reader = PdfReader(uploaded_file)
+        text_content = ""
+        for page in reader.pages:
+            text_content += page.extract_text() or ""
 
-        def chunk_text(text, size=700, overlap=100):
+        def create_chunks(text, size=700, overlap=100):
             chunks = []
-            i = 0
-            while i < len(text):
-                chunks.append(text[i:i+size])
-                i += size - overlap
+            start = 0
+            while start < len(text):
+                end = start + size
+                chunks.append(text[start:end])
+                start += size - overlap
             return chunks
 
-        chunks = chunk_text(text_data)
+        chunks = create_chunks(text_content)
 
-        def index_bg():
-            embeddings = model.encode(chunks, batch_size=32)
+        def background_index():
+            embeddings = model.encode(
+                chunks,
+                batch_size=64,
+                show_progress_bar=False,
+                normalize_embeddings=True
+            )
             with engine.begin() as conn:
                 for chunk, emb in zip(chunks, embeddings):
                     conn.execute(
                         text("""
-                            INSERT INTO documents(user_email,file_name,content,embedding)
-                            VALUES(:e,:f,:c,:emb)
+                            INSERT INTO documents
+                            (user_email,file_name,content,embedding)
+                            VALUES (:e,:f,:c,:emb)
                         """),
                         {
                             "e": st.session_state.user_email,
-                            "f": uploaded.name,
+                            "f": safe_name,
                             "c": chunk,
                             "emb": emb.tolist()
                         }
                     )
 
         if st.button("Index Document"):
-            threading.Thread(target=index_bg).start()
+            thread = threading.Thread(target=background_index)
+            thread.start()
             st.success("Indexing started")
 
     # CHAT DISPLAY
     st.subheader("💬 Conversation")
-
     for role, msg in st.session_state.chat_history:
         if role == "User":
             st.markdown(f"**🧑 You:** {msg}")
@@ -321,30 +343,28 @@ else:
 
     # SEARCH
     st.header("🔎 Ask Question")
+    query = st.text_input("Enter your question", key="search_input")
 
-    query = st.text_input("Enter question", key="query_input")
+    if st.button("Search"):
 
-    if st.button("Search", key="search_btn"):
-
-        if not query or not query.strip():
-            st.warning("Enter a valid question")
+        if not query.strip():
+            st.warning("Enter a question")
             st.stop()
 
-        now = datetime.utcnow()
-        st.session_state.search_timestamps = [
-            t for t in st.session_state.search_timestamps
-            if (now - t).total_seconds() < 60
-        ]
-
-        if len(st.session_state.search_timestamps) >= 5:
-            st.warning("Too many searches. Please wait.")
+        if len(query) > 500:
+            st.warning("Query too long")
             st.stop()
 
-        st.session_state.search_timestamps.append(now)
+        if st.session_state.plan == "free":
+            if st.session_state.search_count >= 20:
+                st.warning("Free plan: 20 searches limit reached")
+                st.stop()
+
+        st.session_state.search_count += 1
 
         st.session_state.chat_history.append(("User", query))
 
-        q_emb = model.encode([query])[0]
+        query_embedding = model.encode([query], normalize_embeddings=True)[0]
 
         with engine.connect() as conn:
             results = conn.execute(
@@ -352,24 +372,30 @@ else:
                     SELECT content FROM documents
                     WHERE user_email=:e
                     ORDER BY embedding <=> :emb
-                    LIMIT 3
+                    LIMIT 5
                 """),
-                {
-                    "e": st.session_state.user_email,
-                    "emb": q_emb.tolist()
-                }
+                {"e": st.session_state.user_email,
+                 "emb": query_embedding.tolist()}
             ).fetchall()
 
-        def highlight(text):
-            for w in query.split():
+        def highlight(text, query):
+            words = query.split()
+            for w in words:
                 text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
             return text
 
         if results:
             answer = results[0][0]
             st.session_state.chat_history.append(("AI", answer))
+
             for r in results:
-                st.markdown(highlight(r[0]), unsafe_allow_html=True)
+                highlighted = highlight(r[0], query)
+                st.markdown(f"""
+                <div style='padding:12px;border:1px solid #444;
+                border-radius:10px;margin-bottom:10px'>
+                {highlighted}
+                </div>
+                """, unsafe_allow_html=True)
         else:
             st.session_state.chat_history.append(("AI", "No relevant answer found"))
             st.warning("No relevant answer found")
