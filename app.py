@@ -27,6 +27,7 @@ body {background-color:#0e1117;color:white;}
     color:white;border-radius:10px;
 }
 section[data-testid="stSidebar"] {background:#111827;}
+mark {background-color:#facc15;color:black;padding:2px;border-radius:4px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,8 +72,8 @@ with engine.begin() as conn:
 
 def send_otp_email(to_email, otp):
     try:
-        msg = MIMEText(f"Your OTP is {otp}")
-        msg["Subject"] = "Password Reset"
+        msg = MIMEText(f"Your OTP is {otp}. Valid for 10 minutes.")
+        msg["Subject"] = "Password Reset OTP"
         msg["From"] = st.secrets["EMAIL_ADDRESS"]
         msg["To"] = to_email
 
@@ -97,8 +98,11 @@ if "logged_in" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
+if "search_timestamps" not in st.session_state:
+    st.session_state.search_timestamps = []
+
 # ---------------------------------------------------
-# AUTH
+# AUTH SECTION
 # ---------------------------------------------------
 
 if not st.session_state.logged_in:
@@ -113,6 +117,7 @@ if not st.session_state.logged_in:
         password = st.text_input("Password", type="password", key="login_password")
 
         if st.button("Login", key="login_btn"):
+
             with engine.connect() as conn:
                 user = conn.execute(
                     text("SELECT password, role, subscription_status FROM users WHERE email=:e"),
@@ -134,7 +139,13 @@ if not st.session_state.logged_in:
         r_pass = st.text_input("Password", type="password", key="reg_pass")
 
         if st.button("Register", key="reg_btn"):
+
+            if not r_pass or len(r_pass) < 6:
+                st.warning("Password must be at least 6 characters")
+                st.stop()
+
             hashed = bcrypt.hashpw(r_pass.encode(), bcrypt.gensalt()).decode()
+
             try:
                 with engine.begin() as conn:
                     conn.execute(
@@ -145,7 +156,7 @@ if not st.session_state.logged_in:
             except:
                 st.error("Email already exists")
 
-    # FORGOT
+    # FORGOT PASSWORD
     with tab3:
         f_email = st.text_input("Enter registered email", key="forgot_email")
 
@@ -163,6 +174,7 @@ if not st.session_state.logged_in:
             new_pass = st.text_input("New Password", type="password", key="new_pass")
 
             if st.button("Reset Password", key="reset_btn"):
+
                 if datetime.utcnow() > st.session_state.expiry:
                     st.error("OTP expired")
                 elif entered == st.session_state.reset_otp:
@@ -191,7 +203,7 @@ else:
         st.session_state.logged_in = False
         st.rerun()
 
-    # ADMIN
+    # ADMIN DASHBOARD
     if st.session_state.role == "admin":
         st.header("🛠 Admin Dashboard")
 
@@ -228,7 +240,7 @@ else:
 
     st.sidebar.metric("Your PDFs", total_files)
 
-    # FILE LIST
+    # FILE MANAGEMENT
     with engine.connect() as conn:
         files = conn.execute(
             text("SELECT DISTINCT file_name FROM documents WHERE user_email=:e"),
@@ -255,6 +267,11 @@ else:
     uploaded = st.file_uploader("Choose PDF", type="pdf")
 
     if uploaded:
+
+        if uploaded.size > 10_000_000:
+            st.warning("Maximum file size is 10MB")
+            st.stop()
+
         if st.session_state.plan == "free" and total_files >= 3:
             st.warning("Free plan limit reached")
             st.stop()
@@ -307,12 +324,23 @@ else:
 
     query = st.text_input("Enter question", key="query_input")
 
-    def highlight(text, q):
-        for w in q.split():
-            text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
-        return text
-
     if st.button("Search", key="search_btn"):
+
+        if not query or not query.strip():
+            st.warning("Enter a valid question")
+            st.stop()
+
+        now = datetime.utcnow()
+        st.session_state.search_timestamps = [
+            t for t in st.session_state.search_timestamps
+            if (now - t).total_seconds() < 60
+        ]
+
+        if len(st.session_state.search_timestamps) >= 5:
+            st.warning("Too many searches. Please wait.")
+            st.stop()
+
+        st.session_state.search_timestamps.append(now)
 
         st.session_state.chat_history.append(("User", query))
 
@@ -332,12 +360,16 @@ else:
                 }
             ).fetchall()
 
+        def highlight(text):
+            for w in query.split():
+                text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
+            return text
+
         if results:
             answer = results[0][0]
             st.session_state.chat_history.append(("AI", answer))
-
             for r in results:
-                st.markdown(highlight(r[0], query), unsafe_allow_html=True)
+                st.markdown(highlight(r[0]), unsafe_allow_html=True)
         else:
             st.session_state.chat_history.append(("AI", "No relevant answer found"))
             st.warning("No relevant answer found")
