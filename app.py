@@ -27,11 +27,20 @@ mark {background:#7c3aed;color:white;}
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------
-# DATABASE
+# DATABASE CONNECTION FIXED
 # ------------------------------------------------
 
 DATABASE_URL = st.secrets["DATABASE_URL"]
-engine = create_engine(DATABASE_URL)
+
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300
+)
+
+# ------------------------------------------------
+# CREATE TABLES
+# ------------------------------------------------
 
 with engine.begin() as conn:
     conn.execute(text("""
@@ -140,8 +149,8 @@ if not st.session_state.logged_in:
                             {"e": reg_email, "p": hashed}
                         )
                     st.success("Registered successfully")
-                except:
-                    st.error("Email already exists")
+                except Exception as e:
+                    st.error(f"Registration failed: {e}")
 
 # ------------------------------------------------
 # MAIN APP
@@ -182,7 +191,10 @@ else:
                 embeddings = model.encode(chunks)
                 embeddings = normalize(embeddings)
 
-                with engine.begin() as conn:
+                conn = engine.connect()
+                trans = conn.begin()
+
+                try:
                     for c, e in zip(chunks, embeddings):
                         conn.execute(text("""
                         INSERT INTO documents(user_email,file_name,content,embedding)
@@ -194,7 +206,15 @@ else:
                             "e": json.dumps(e.tolist())
                         })
 
-                st.success("Indexing complete")
+                    trans.commit()
+                    st.success("Indexing complete")
+
+                except Exception as err:
+                    trans.rollback()
+                    st.error(f"Insert failed: {err}")
+
+                finally:
+                    conn.close()
 
                 with engine.connect() as conn:
                     count = conn.execute(
@@ -244,7 +264,7 @@ else:
 
         scored = sorted(scored, reverse=True)[:3]
 
-        if scored and scored[0][0] > 0.2:
+        if scored and scored[0][0] > 0.15:
 
             context = "\n".join([s[1] for s in scored])
 
@@ -265,7 +285,7 @@ else:
         else:
             st.warning("Relevant answer not found.")
 
-    # ---------------- CHAT ----------------
+    # ---------------- CHAT HISTORY ----------------
 
     st.subheader("💬 Conversation")
 
