@@ -5,6 +5,7 @@ import random
 import smtplib
 import threading
 import numpy as np
+import requests
 
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
@@ -29,6 +30,10 @@ body {background-color: #0e1117; color: white;}
 section[data-testid="stSidebar"] {
     background-color: #111827;
 }
+mark {
+    background-color: #7c3aed;
+    color: white;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -50,6 +55,8 @@ model = load_model()
 # ------------------------------------------------
 
 with engine.begin() as conn:
+    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+
     conn.execute(text("""
     CREATE TABLE IF NOT EXISTS users(
         id SERIAL PRIMARY KEY,
@@ -67,7 +74,7 @@ with engine.begin() as conn:
         user_email TEXT,
         file_name TEXT,
         content TEXT,
-        embedding FLOAT8[],
+        embedding vector(384),
         created_at TIMESTAMP DEFAULT NOW()
     );
     """))
@@ -79,6 +86,12 @@ with engine.begin() as conn:
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "query_count" not in st.session_state:
+    st.session_state.query_count = 0
+
 # ------------------------------------------------
 # VALIDATION
 # ------------------------------------------------
@@ -88,6 +101,16 @@ def valid_email(email):
 
 def valid_password(password):
     return len(password) >= 6
+
+# ------------------------------------------------
+# HIGHLIGHT FUNCTION
+# ------------------------------------------------
+
+def highlight(text, query):
+    words = query.split()
+    for w in words:
+        text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
+    return text
 
 # ------------------------------------------------
 # EMAIL OTP
@@ -111,16 +134,15 @@ def send_otp(email, otp):
         return False
 
 # ------------------------------------------------
-# AUTH SECTION
+# AUTH
 # ------------------------------------------------
 
 if not st.session_state.logged_in:
 
     st.title("🔐 AI PDF SaaS Platform")
 
-    tab1, tab2, tab3 = st.tabs(["Login", "Register", "Forgot Password"])
+    tab1, tab2, tab3 = st.tabs(["Login", "Register", "Forgot"])
 
-    # LOGIN
     with tab1:
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
@@ -141,16 +163,15 @@ if not st.session_state.logged_in:
             else:
                 st.error("Invalid credentials")
 
-    # REGISTER
     with tab2:
-        reg_email = st.text_input("Email", key="reg_email")
-        reg_pass = st.text_input("Password", type="password", key="reg_pass")
+        reg_email = st.text_input("Email", key="reg")
+        reg_pass = st.text_input("Password", type="password", key="regp")
 
         if st.button("Register"):
             if not valid_email(reg_email):
-                st.error("Invalid email format")
+                st.error("Invalid email")
             elif not valid_password(reg_pass):
-                st.error("Password must be 6+ characters")
+                st.error("Password 6+ chars")
             else:
                 hashed = bcrypt.hashpw(reg_pass.encode(), bcrypt.gensalt()).decode()
                 try:
@@ -159,155 +180,108 @@ if not st.session_state.logged_in:
                             text("INSERT INTO users(email,password) VALUES(:e,:p)"),
                             {"e": reg_email, "p": hashed}
                         )
-                    st.success("Registration successful")
+                    st.success("Registered")
                 except:
-                    st.error("Email already exists")
-
-    # FORGOT
-    with tab3:
-        forgot_email = st.text_input("Enter registered email")
-
-        if st.button("Send OTP"):
-            otp = str(random.randint(100000,999999))
-            st.session_state.reset_otp = otp
-            st.session_state.reset_email = forgot_email
-            st.session_state.expiry = datetime.utcnow()+timedelta(minutes=10)
-
-            if send_otp(forgot_email, otp):
-                st.success("OTP sent")
-
-        if "reset_otp" in st.session_state:
-            entered = st.text_input("Enter OTP")
-            new_pass = st.text_input("New Password", type="password")
-
-            if st.button("Reset Password"):
-                if datetime.utcnow() > st.session_state.expiry:
-                    st.error("OTP expired")
-                elif entered == st.session_state.reset_otp:
-                    hashed = bcrypt.hashpw(new_pass.encode(), bcrypt.gensalt()).decode()
-                    with engine.begin() as conn:
-                        conn.execute(
-                            text("UPDATE users SET password=:p WHERE email=:e"),
-                            {"p": hashed, "e": st.session_state.reset_email}
-                        )
-                    st.success("Password reset successful")
-                else:
-                    st.error("Invalid OTP")
+                    st.error("Email exists")
 
 # ------------------------------------------------
-# MAIN DASHBOARD
+# MAIN APP
 # ------------------------------------------------
 
 else:
 
-    st.sidebar.success(f"{st.session_state.user_email}")
-    st.sidebar.write(f"Role: {st.session_state.role}")
+    st.sidebar.success(st.session_state.user_email)
     st.sidebar.write(f"Plan: {st.session_state.plan}")
 
     if st.sidebar.button("Logout"):
-        st.session_state.logged_in = False
+        st.session_state.logged_in=False
         st.rerun()
 
-    # FILE LIMIT
-    with engine.connect() as conn:
-        file_count = conn.execute(
-            text("SELECT COUNT(DISTINCT file_name) FROM documents WHERE user_email=:e"),
-            {"e": st.session_state.user_email}
-        ).scalar()
-
-    st.sidebar.metric("Your Files", file_count)
-
-    if st.session_state.plan == "free" and file_count >= 3:
-        st.warning("Free plan allows max 3 PDFs")
-        allow_upload = False
-    else:
-        allow_upload = True
-
+    # ------------------------------------------------
     # UPLOAD
+    # ------------------------------------------------
+
     st.header("📄 Upload PDF")
 
-    if allow_upload:
-        uploaded_files = st.file_uploader(
-            "Upload multiple PDFs",
-            type="pdf",
-            accept_multiple_files=True
-        )
+    uploaded = st.file_uploader("Upload PDF", type="pdf")
 
-        if uploaded_files:
-            for uploaded in uploaded_files:
+    if uploaded:
+        reader = PdfReader(uploaded)
+        text_data=""
+        for page in reader.pages:
+            text_data += page.extract_text() or ""
 
-                if uploaded.size > 5 * 1024 * 1024:
-                    st.error(f"{uploaded.name} too large (5MB max)")
-                    continue
+        chunks=[text_data[i:i+700] for i in range(0,len(text_data),600)]
 
-                reader = PdfReader(uploaded)
-                text_data = ""
+        def bg_index():
+            emb = model.encode(chunks)
+            emb = normalize(emb)
 
-                for page in reader.pages:
-                    text_data += page.extract_text() or ""
-
-                def create_chunks(text, size=700, overlap=100):
-                    chunks = []
-                    start = 0
-                    while start < len(text):
-                        end = start + size
-                        chunks.append(text[start:end])
-                        start += size - overlap
-                    return chunks
-
-                chunks = create_chunks(text_data)
-
-                def background_index(chunks, file_name):
-                    embeddings = model.encode(chunks, batch_size=32)
-                    embeddings = normalize(embeddings)
-
-                    with engine.begin() as conn:
-                        for chunk, emb in zip(chunks, embeddings):
-                            conn.execute(
-                                text("""
-                                INSERT INTO documents
-                                (user_email,file_name,content,embedding)
-                                VALUES(:u,:f,:c,:e)
-                                """),
-                                {
-                                    "u": st.session_state.user_email,
-                                    "f": file_name,
-                                    "c": chunk,
-                                    "e": emb.tolist()
-                                }
-                            )
-
-                if st.button(f"Index {uploaded.name}"):
-                    threading.Thread(
-                        target=background_index,
-                        args=(chunks, uploaded.name)
-                    ).start()
-                    st.success(f"Indexing started for {uploaded.name}")
-
-    # DELETE
-    st.header("🗑 Manage Files")
-
-    with engine.connect() as conn:
-        files = conn.execute(
-            text("SELECT DISTINCT file_name FROM documents WHERE user_email=:e"),
-            {"e": st.session_state.user_email}
-        ).fetchall()
-
-    file_list = [f[0] for f in files]
-
-    if file_list:
-        selected = st.selectbox("Your Uploaded Files", file_list)
-
-        if st.button("Delete Selected File"):
             with engine.begin() as conn:
-                conn.execute(
-                    text("""
-                    DELETE FROM documents
-                    WHERE user_email=:e AND file_name=:f
-                    """),
-                    {"e": st.session_state.user_email, "f": selected}
-                )
-            st.success("File deleted")
-            st.rerun()
-    else:
-        st.info("No files uploaded yet.")
+                for c,e in zip(chunks,emb):
+                    conn.execute(text("""
+                    INSERT INTO documents(user_email,file_name,content,embedding)
+                    VALUES(:u,:f,:c,:e)
+                    """),{"u":st.session_state.user_email,
+                          "f":uploaded.name,
+                          "c":c,
+                          "e":e.tolist()})
+
+        if st.button("Index"):
+            threading.Thread(target=bg_index).start()
+            st.success("Indexed")
+
+    # ------------------------------------------------
+    # SEARCH
+    # ------------------------------------------------
+
+    st.header("🔎 Ask Question")
+
+    query = st.text_input("Ask something")
+
+    if st.button("Search"):
+
+        if len(query)>300:
+            st.error("Query too long")
+        elif st.session_state.query_count>=10:
+            st.warning("Daily limit reached")
+        else:
+            st.session_state.query_count+=1
+
+            q_emb = normalize(model.encode([query]))[0]
+
+            with engine.connect() as conn:
+                results = conn.execute(text("""
+                SELECT content FROM documents
+                WHERE user_email=:e
+                ORDER BY embedding <=> :emb
+                LIMIT 3
+                """),{"e":st.session_state.user_email,
+                      "emb":q_emb.tolist()}).fetchall()
+
+            if results:
+                context="\n".join([r[0] for r in results])
+
+                response = requests.post(
+                    "http://localhost:11434/api/generate",
+                    json={"model":"tinyllama",
+                          "prompt":f"Answer from context:\n{context}\nQ:{query}",
+                          "stream":False}).json()["response"]
+
+                st.session_state.chat_history.append(("User",query))
+                st.session_state.chat_history.append(("AI",response))
+
+                st.markdown(highlight(response,query), unsafe_allow_html=True)
+            else:
+                st.warning("No answer found")
+
+    # ------------------------------------------------
+    # CHAT MEMORY
+    # ------------------------------------------------
+
+    st.subheader("💬 Conversation")
+    for role,msg in st.session_state.chat_history:
+        if role=="User":
+            st.markdown(f"**🧑 {msg}**")
+        else:
+            st.markdown(f"**🤖 {msg}**")
