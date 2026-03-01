@@ -3,13 +3,14 @@ import re
 import bcrypt
 import numpy as np
 import requests
+import json
 from sqlalchemy import create_engine, text
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import normalize
 
 # ------------------------------------------------
-# PAGE CONFIG + DARK UI
+# PAGE CONFIG
 # ------------------------------------------------
 
 st.set_page_config(page_title="AI PDF SaaS", layout="wide")
@@ -49,7 +50,7 @@ with engine.begin() as conn:
         user_email TEXT,
         file_name TEXT,
         content TEXT,
-        embedding FLOAT8[]
+        embedding TEXT
     );
     """))
 
@@ -64,7 +65,7 @@ def load_model():
 model = load_model()
 
 # ------------------------------------------------
-# SESSION
+# SESSION INIT
 # ------------------------------------------------
 
 if "logged_in" not in st.session_state:
@@ -171,8 +172,9 @@ else:
         st.write("Extracted text length:", len(text_data))
 
         if len(text_data) < 50:
-            st.error("PDF text not detected. Possibly scanned PDF.")
+            st.error("PDF text not detected (possibly scanned PDF)")
         else:
+
             chunks = [text_data[i:i+700] for i in range(0, len(text_data), 600)]
 
             if st.button("Index PDF"):
@@ -189,7 +191,7 @@ else:
                             "u": st.session_state.user_email,
                             "f": uploaded.name,
                             "c": c,
-                            "e": e.tolist()
+                            "e": json.dumps(e.tolist())
                         })
 
                 st.success("Indexing complete")
@@ -211,56 +213,59 @@ else:
 
         if len(query) > 300:
             st.error("Query too long")
-        elif st.session_state.query_count >= 20:
+            st.stop()
+
+        if st.session_state.query_count >= 20:
             st.warning("Daily limit reached")
+            st.stop()
+
+        st.session_state.query_count += 1
+
+        q_emb = model.encode([query])
+        q_emb = normalize(q_emb)[0]
+
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT content, embedding FROM documents WHERE user_email=:e"),
+                {"e": st.session_state.user_email}
+            ).fetchall()
+
+        if not rows:
+            st.warning("No documents indexed yet.")
+            st.stop()
+
+        scored = []
+
+        for row in rows:
+            content = row[0]
+            emb = np.array(json.loads(row[1]))
+            score = np.dot(q_emb, emb)
+            scored.append((score, content))
+
+        scored = sorted(scored, reverse=True)[:3]
+
+        if scored and scored[0][0] > 0.2:
+
+            context = "\n".join([s[1] for s in scored])
+
+            response = requests.post(
+                "http://localhost:11434/api/generate",
+                json={
+                    "model": "tinyllama",
+                    "prompt": f"Answer only from context:\n{context}\nQuestion:{query}",
+                    "stream": False
+                }
+            ).json()["response"]
+
+            st.session_state.chat_history.append(("User", query))
+            st.session_state.chat_history.append(("AI", response))
+
+            st.markdown(highlight(response, query), unsafe_allow_html=True)
+
         else:
-            st.session_state.query_count += 1
+            st.warning("Relevant answer not found.")
 
-            q_emb = model.encode([query])
-            q_emb = normalize(q_emb)[0]
-
-            with engine.connect() as conn:
-                rows = conn.execute(
-                    text("SELECT content, embedding FROM documents WHERE user_email=:e"),
-                    {"e": st.session_state.user_email}
-                ).fetchall()
-
-            if not rows:
-                st.warning("No documents indexed yet.")
-                st.stop()
-
-            scored = []
-
-            for row in rows:
-                content = row[0]
-                emb = np.array(row[1])
-                score = np.dot(q_emb, emb)
-                scored.append((score, content))
-
-            scored = sorted(scored, reverse=True)[:3]
-
-            if scored and scored[0][0] > 0.2:
-
-                context = "\n".join([s[1] for s in scored])
-
-                response = requests.post(
-                    "http://localhost:11434/api/generate",
-                    json={
-                        "model": "tinyllama",
-                        "prompt": f"Answer only from context:\n{context}\nQuestion:{query}",
-                        "stream": False
-                    }
-                ).json()["response"]
-
-                st.session_state.chat_history.append(("User", query))
-                st.session_state.chat_history.append(("AI", response))
-
-                st.markdown(highlight(response, query), unsafe_allow_html=True)
-
-            else:
-                st.warning("Relevant answer not found.")
-
-    # ---------------- CHAT HISTORY ----------------
+    # ---------------- CHAT ----------------
 
     st.subheader("💬 Conversation")
 
