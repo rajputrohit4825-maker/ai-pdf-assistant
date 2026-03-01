@@ -3,9 +3,15 @@ import re
 import bcrypt
 import random
 import smtplib
+import threading
+import numpy as np
+
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
+from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer
+from sklearn.preprocessing import normalize
 
 # ------------------------------------------------
 # CONFIG
@@ -30,7 +36,17 @@ DATABASE_URL = st.secrets["DATABASE_URL"]
 engine = create_engine(DATABASE_URL)
 
 # ------------------------------------------------
-# DATABASE TABLE
+# LOAD EMBEDDING MODEL
+# ------------------------------------------------
+
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+model = load_model()
+
+# ------------------------------------------------
+# DATABASE TABLES
 # ------------------------------------------------
 
 with engine.begin() as conn:
@@ -45,15 +61,23 @@ with engine.begin() as conn:
     );
     """))
 
+    conn.execute(text("""
+    CREATE TABLE IF NOT EXISTS documents(
+        id SERIAL PRIMARY KEY,
+        user_email TEXT,
+        file_name TEXT,
+        content TEXT,
+        embedding FLOAT8[],
+        created_at TIMESTAMP DEFAULT NOW()
+    );
+    """))
+
 # ------------------------------------------------
 # SESSION INIT
 # ------------------------------------------------
 
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
-
-if "query_count" not in st.session_state:
-    st.session_state.query_count = 0
 
 # ------------------------------------------------
 # VALIDATION
@@ -96,7 +120,7 @@ if not st.session_state.logged_in:
 
     tab1, tab2, tab3 = st.tabs(["Login", "Register", "Forgot Password"])
 
-    # ---------------- LOGIN ----------------
+    # LOGIN
     with tab1:
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
@@ -113,12 +137,11 @@ if not st.session_state.logged_in:
                 st.session_state.user_email = email
                 st.session_state.role = user[1]
                 st.session_state.plan = user[2]
-                st.success("Login successful")
                 st.rerun()
             else:
                 st.error("Invalid credentials")
 
-    # ---------------- REGISTER ----------------
+    # REGISTER
     with tab2:
         reg_email = st.text_input("Email", key="reg_email")
         reg_pass = st.text_input("Password", type="password", key="reg_pass")
@@ -140,7 +163,7 @@ if not st.session_state.logged_in:
                 except:
                     st.error("Email already exists")
 
-    # ---------------- FORGOT PASSWORD ----------------
+    # FORGOT
     with tab3:
         forgot_email = st.text_input("Enter registered email")
 
@@ -151,7 +174,7 @@ if not st.session_state.logged_in:
             st.session_state.expiry = datetime.utcnow()+timedelta(minutes=10)
 
             if send_otp(forgot_email, otp):
-                st.success("OTP sent to email")
+                st.success("OTP sent")
 
         if "reset_otp" in st.session_state:
             entered = st.text_input("Enter OTP")
@@ -185,15 +208,106 @@ else:
         st.session_state.logged_in = False
         st.rerun()
 
-    # Plan Logic
-    if st.session_state.plan == "free":
-        st.warning("Free Plan Active")
-        if st.button("Upgrade to Pro"):
-            st.info("Stripe integration will be added in Phase 4")
+    # FILE LIMIT
+    with engine.connect() as conn:
+        file_count = conn.execute(
+            text("SELECT COUNT(DISTINCT file_name) FROM documents WHERE user_email=:e"),
+            {"e": st.session_state.user_email}
+        ).scalar()
 
+    st.sidebar.metric("Your Files", file_count)
+
+    if st.session_state.plan == "free" and file_count >= 3:
+        st.warning("Free plan allows max 3 PDFs")
+        allow_upload = False
     else:
-        st.success("Pro Plan Active 🔥")
+        allow_upload = True
 
-    st.header("Dashboard Ready")
+    # UPLOAD
+    st.header("📄 Upload PDF")
 
-    st.info("Phase 1 complete: Auth + Role + Plan + OTP + UI foundation")
+    if allow_upload:
+        uploaded_files = st.file_uploader(
+            "Upload multiple PDFs",
+            type="pdf",
+            accept_multiple_files=True
+        )
+
+        if uploaded_files:
+            for uploaded in uploaded_files:
+
+                if uploaded.size > 5 * 1024 * 1024:
+                    st.error(f"{uploaded.name} too large (5MB max)")
+                    continue
+
+                reader = PdfReader(uploaded)
+                text_data = ""
+
+                for page in reader.pages:
+                    text_data += page.extract_text() or ""
+
+                def create_chunks(text, size=700, overlap=100):
+                    chunks = []
+                    start = 0
+                    while start < len(text):
+                        end = start + size
+                        chunks.append(text[start:end])
+                        start += size - overlap
+                    return chunks
+
+                chunks = create_chunks(text_data)
+
+                def background_index(chunks, file_name):
+                    embeddings = model.encode(chunks, batch_size=32)
+                    embeddings = normalize(embeddings)
+
+                    with engine.begin() as conn:
+                        for chunk, emb in zip(chunks, embeddings):
+                            conn.execute(
+                                text("""
+                                INSERT INTO documents
+                                (user_email,file_name,content,embedding)
+                                VALUES(:u,:f,:c,:e)
+                                """),
+                                {
+                                    "u": st.session_state.user_email,
+                                    "f": file_name,
+                                    "c": chunk,
+                                    "e": emb.tolist()
+                                }
+                            )
+
+                if st.button(f"Index {uploaded.name}"):
+                    threading.Thread(
+                        target=background_index,
+                        args=(chunks, uploaded.name)
+                    ).start()
+                    st.success(f"Indexing started for {uploaded.name}")
+
+    # DELETE
+    st.header("🗑 Manage Files")
+
+    with engine.connect() as conn:
+        files = conn.execute(
+            text("SELECT DISTINCT file_name FROM documents WHERE user_email=:e"),
+            {"e": st.session_state.user_email}
+        ).fetchall()
+
+    file_list = [f[0] for f in files]
+
+    if file_list:
+        selected = st.selectbox("Your Uploaded Files", file_list)
+
+        if st.button("Delete Selected File"):
+            with engine.begin() as conn:
+                conn.execute(
+                    text("""
+                    DELETE FROM documents
+                    WHERE user_email=:e AND file_name=:f
+                    """),
+                    {"e": st.session_state.user_email, "f": selected}
+                )
+            st.success("File deleted")
+            st.rerun()
+    else:
+        st.info("No files uploaded yet.")
