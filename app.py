@@ -41,7 +41,7 @@ DATABASE_URL = st.secrets["DATABASE_URL"]
 engine = create_engine(DATABASE_URL)
 
 # ------------------------------------------------
-# LOAD EMBEDDING MODEL
+# LOAD MODEL
 # ------------------------------------------------
 
 @st.cache_resource
@@ -51,20 +51,17 @@ def load_model():
 model = load_model()
 
 # ------------------------------------------------
-# DATABASE TABLES
+# DATABASE
 # ------------------------------------------------
 
 with engine.begin() as conn:
-    conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
-
     conn.execute(text("""
     CREATE TABLE IF NOT EXISTS users(
         id SERIAL PRIMARY KEY,
         email TEXT UNIQUE,
         password TEXT,
         role TEXT DEFAULT 'user',
-        subscription_status TEXT DEFAULT 'free',
-        created_at TIMESTAMP DEFAULT NOW()
+        subscription_status TEXT DEFAULT 'free'
     );
     """))
 
@@ -74,8 +71,7 @@ with engine.begin() as conn:
         user_email TEXT,
         file_name TEXT,
         content TEXT,
-        embedding vector(384),
-        created_at TIMESTAMP DEFAULT NOW()
+        embedding FLOAT8[]
     );
     """))
 
@@ -102,32 +98,25 @@ def valid_email(email):
 def valid_password(password):
     return len(password) >= 6
 
-# ------------------------------------------------
-# HIGHLIGHT FUNCTION
-# ------------------------------------------------
-
 def highlight(text, query):
-    words = query.split()
-    for w in words:
+    for w in query.split():
         text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
     return text
 
 # ------------------------------------------------
-# EMAIL OTP
+# OTP
 # ------------------------------------------------
 
 def send_otp(email, otp):
     try:
-        msg = MIMEText(f"Your OTP is: {otp}\nValid for 10 minutes.")
-        msg["Subject"] = "Password Reset OTP"
+        msg = MIMEText(f"Your OTP: {otp}")
+        msg["Subject"] = "Password Reset"
         msg["From"] = st.secrets["EMAIL_ADDRESS"]
         msg["To"] = email
 
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(
-                st.secrets["EMAIL_ADDRESS"],
-                st.secrets["EMAIL_PASSWORD"]
-            )
+            server.login(st.secrets["EMAIL_ADDRESS"],
+                         st.secrets["EMAIL_PASSWORD"])
             server.send_message(msg)
         return True
     except:
@@ -139,9 +128,9 @@ def send_otp(email, otp):
 
 if not st.session_state.logged_in:
 
-    st.title("🔐 AI PDF SaaS Platform")
+    st.title("🔐 AI PDF SaaS")
 
-    tab1, tab2, tab3 = st.tabs(["Login", "Register", "Forgot"])
+    tab1, tab2 = st.tabs(["Login", "Register"])
 
     with tab1:
         email = st.text_input("Email")
@@ -171,7 +160,7 @@ if not st.session_state.logged_in:
             if not valid_email(reg_email):
                 st.error("Invalid email")
             elif not valid_password(reg_pass):
-                st.error("Password 6+ chars")
+                st.error("Password min 6 chars")
             else:
                 hashed = bcrypt.hashpw(reg_pass.encode(), bcrypt.gensalt()).decode()
                 try:
@@ -197,12 +186,9 @@ else:
         st.session_state.logged_in=False
         st.rerun()
 
-    # ------------------------------------------------
-    # UPLOAD
-    # ------------------------------------------------
+    # ---------------- Upload ----------------
 
     st.header("📄 Upload PDF")
-
     uploaded = st.file_uploader("Upload PDF", type="pdf")
 
     if uploaded:
@@ -231,12 +217,9 @@ else:
             threading.Thread(target=bg_index).start()
             st.success("Indexed")
 
-    # ------------------------------------------------
-    # SEARCH
-    # ------------------------------------------------
+    # ---------------- Search ----------------
 
     st.header("🔎 Ask Question")
-
     query = st.text_input("Ask something")
 
     if st.button("Search"):
@@ -251,33 +234,40 @@ else:
             q_emb = normalize(model.encode([query]))[0]
 
             with engine.connect() as conn:
-                results = conn.execute(text("""
-                SELECT content FROM documents
-                WHERE user_email=:e
-                ORDER BY embedding <=> :emb
-                LIMIT 3
-                """),{"e":st.session_state.user_email,
-                      "emb":q_emb.tolist()}).fetchall()
+                rows = conn.execute(
+                    text("SELECT content, embedding FROM documents WHERE user_email=:e"),
+                    {"e": st.session_state.user_email}
+                ).fetchall()
 
-            if results:
-                context="\n".join([r[0] for r in results])
+            scored=[]
+            for row in rows:
+                content=row[0]
+                emb=np.array(row[1])
+                score=np.dot(q_emb,emb)
+                scored.append((score,content))
+
+            scored=sorted(scored,reverse=True)[:3]
+
+            if scored:
+                context="\n".join([s[1] for s in scored])
 
                 response = requests.post(
                     "http://localhost:11434/api/generate",
-                    json={"model":"tinyllama",
-                          "prompt":f"Answer from context:\n{context}\nQ:{query}",
-                          "stream":False}).json()["response"]
+                    json={
+                        "model":"tinyllama",
+                        "prompt":f"Answer from context:\n{context}\nQ:{query}",
+                        "stream":False
+                    }
+                ).json()["response"]
 
                 st.session_state.chat_history.append(("User",query))
                 st.session_state.chat_history.append(("AI",response))
 
                 st.markdown(highlight(response,query), unsafe_allow_html=True)
             else:
-                st.warning("No answer found")
+                st.warning("No data found")
 
-    # ------------------------------------------------
-    # CHAT MEMORY
-    # ------------------------------------------------
+    # ---------------- Chat ----------------
 
     st.subheader("💬 Conversation")
     for role,msg in st.session_state.chat_history:
