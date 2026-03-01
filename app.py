@@ -1,58 +1,36 @@
 import streamlit as st
 import re
 import bcrypt
-import random
-import smtplib
-import threading
 import numpy as np
 import requests
-
-from email.mime.text import MIMEText
-from datetime import datetime, timedelta
 from sqlalchemy import create_engine, text
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import normalize
 
 # ------------------------------------------------
-# CONFIG
+# PAGE CONFIG + DARK UI
 # ------------------------------------------------
 
 st.set_page_config(page_title="AI PDF SaaS", layout="wide")
 
 st.markdown("""
 <style>
-body {background-color: #0e1117; color: white;}
+body {background-color:#0e1117;color:white;}
 .stButton>button {
-    background: linear-gradient(90deg,#2563eb,#7c3aed);
-    color: white; border-radius: 8px;
+    background:linear-gradient(90deg,#2563eb,#7c3aed);
+    color:white;border-radius:8px;
 }
-section[data-testid="stSidebar"] {
-    background-color: #111827;
-}
-mark {
-    background-color: #7c3aed;
-    color: white;
-}
+mark {background:#7c3aed;color:white;}
 </style>
 """, unsafe_allow_html=True)
-
-DATABASE_URL = st.secrets["DATABASE_URL"]
-engine = create_engine(DATABASE_URL)
-
-# ------------------------------------------------
-# LOAD MODEL
-# ------------------------------------------------
-
-@st.cache_resource
-def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
-
-model = load_model()
 
 # ------------------------------------------------
 # DATABASE
 # ------------------------------------------------
+
+DATABASE_URL = st.secrets["DATABASE_URL"]
+engine = create_engine(DATABASE_URL)
 
 with engine.begin() as conn:
     conn.execute(text("""
@@ -76,7 +54,17 @@ with engine.begin() as conn:
     """))
 
 # ------------------------------------------------
-# SESSION INIT
+# LOAD MODEL
+# ------------------------------------------------
+
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+model = load_model()
+
+# ------------------------------------------------
+# SESSION
 # ------------------------------------------------
 
 if "logged_in" not in st.session_state:
@@ -89,38 +77,19 @@ if "query_count" not in st.session_state:
     st.session_state.query_count = 0
 
 # ------------------------------------------------
-# VALIDATION
+# HELPERS
 # ------------------------------------------------
 
 def valid_email(email):
     return re.match(r"[^@]+@[^@]+\.[^@]+", email)
 
-def valid_password(password):
-    return len(password) >= 6
+def valid_password(p):
+    return len(p) >= 6
 
 def highlight(text, query):
     for w in query.split():
         text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
     return text
-
-# ------------------------------------------------
-# OTP
-# ------------------------------------------------
-
-def send_otp(email, otp):
-    try:
-        msg = MIMEText(f"Your OTP: {otp}")
-        msg["Subject"] = "Password Reset"
-        msg["From"] = st.secrets["EMAIL_ADDRESS"]
-        msg["To"] = email
-
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(st.secrets["EMAIL_ADDRESS"],
-                         st.secrets["EMAIL_PASSWORD"])
-            server.send_message(msg)
-        return True
-    except:
-        return False
 
 # ------------------------------------------------
 # AUTH
@@ -169,9 +138,9 @@ if not st.session_state.logged_in:
                             text("INSERT INTO users(email,password) VALUES(:e,:p)"),
                             {"e": reg_email, "p": hashed}
                         )
-                    st.success("Registered")
+                    st.success("Registered successfully")
                 except:
-                    st.error("Email exists")
+                    st.error("Email already exists")
 
 # ------------------------------------------------
 # MAIN APP
@@ -183,55 +152,72 @@ else:
     st.sidebar.write(f"Plan: {st.session_state.plan}")
 
     if st.sidebar.button("Logout"):
-        st.session_state.logged_in=False
+        st.session_state.logged_in = False
         st.rerun()
 
-    # ---------------- Upload ----------------
+    # ---------------- PDF UPLOAD ----------------
 
     st.header("📄 Upload PDF")
     uploaded = st.file_uploader("Upload PDF", type="pdf")
 
     if uploaded:
+
         reader = PdfReader(uploaded)
-        text_data=""
+        text_data = ""
+
         for page in reader.pages:
             text_data += page.extract_text() or ""
 
-        chunks=[text_data[i:i+700] for i in range(0,len(text_data),600)]
+        st.write("Extracted text length:", len(text_data))
 
-        def bg_index():
-            emb = model.encode(chunks)
-            emb = normalize(emb)
+        if len(text_data) < 50:
+            st.error("PDF text not detected. Possibly scanned PDF.")
+        else:
+            chunks = [text_data[i:i+700] for i in range(0, len(text_data), 600)]
 
-            with engine.begin() as conn:
-                for c,e in zip(chunks,emb):
-                    conn.execute(text("""
-                    INSERT INTO documents(user_email,file_name,content,embedding)
-                    VALUES(:u,:f,:c,:e)
-                    """),{"u":st.session_state.user_email,
-                          "f":uploaded.name,
-                          "c":c,
-                          "e":e.tolist()})
+            if st.button("Index PDF"):
 
-        if st.button("Index"):
-            threading.Thread(target=bg_index).start()
-            st.success("Indexed")
+                embeddings = model.encode(chunks)
+                embeddings = normalize(embeddings)
 
-    # ---------------- Search ----------------
+                with engine.begin() as conn:
+                    for c, e in zip(chunks, embeddings):
+                        conn.execute(text("""
+                        INSERT INTO documents(user_email,file_name,content,embedding)
+                        VALUES(:u,:f,:c,:e)
+                        """), {
+                            "u": st.session_state.user_email,
+                            "f": uploaded.name,
+                            "c": c,
+                            "e": e.tolist()
+                        })
+
+                st.success("Indexing complete")
+
+                with engine.connect() as conn:
+                    count = conn.execute(
+                        text("SELECT COUNT(*) FROM documents WHERE user_email=:e"),
+                        {"e": st.session_state.user_email}
+                    ).scalar()
+
+                st.write("Total stored chunks:", count)
+
+    # ---------------- SEARCH ----------------
 
     st.header("🔎 Ask Question")
-    query = st.text_input("Ask something")
+    query = st.text_input("Enter your question")
 
     if st.button("Search"):
 
-        if len(query)>300:
+        if len(query) > 300:
             st.error("Query too long")
-        elif st.session_state.query_count>=10:
+        elif st.session_state.query_count >= 20:
             st.warning("Daily limit reached")
         else:
-            st.session_state.query_count+=1
+            st.session_state.query_count += 1
 
-            q_emb = normalize(model.encode([query]))[0]
+            q_emb = model.encode([query])
+            q_emb = normalize(q_emb)[0]
 
             with engine.connect() as conn:
                 rows = conn.execute(
@@ -239,39 +225,47 @@ else:
                     {"e": st.session_state.user_email}
                 ).fetchall()
 
-            scored=[]
+            if not rows:
+                st.warning("No documents indexed yet.")
+                st.stop()
+
+            scored = []
+
             for row in rows:
-                content=row[0]
-                emb=np.array(row[1])
-                score=np.dot(q_emb,emb)
-                scored.append((score,content))
+                content = row[0]
+                emb = np.array(row[1])
+                score = np.dot(q_emb, emb)
+                scored.append((score, content))
 
-            scored=sorted(scored,reverse=True)[:3]
+            scored = sorted(scored, reverse=True)[:3]
 
-            if scored:
-                context="\n".join([s[1] for s in scored])
+            if scored and scored[0][0] > 0.2:
+
+                context = "\n".join([s[1] for s in scored])
 
                 response = requests.post(
                     "http://localhost:11434/api/generate",
                     json={
-                        "model":"tinyllama",
-                        "prompt":f"Answer from context:\n{context}\nQ:{query}",
-                        "stream":False
+                        "model": "tinyllama",
+                        "prompt": f"Answer only from context:\n{context}\nQuestion:{query}",
+                        "stream": False
                     }
                 ).json()["response"]
 
-                st.session_state.chat_history.append(("User",query))
-                st.session_state.chat_history.append(("AI",response))
+                st.session_state.chat_history.append(("User", query))
+                st.session_state.chat_history.append(("AI", response))
 
-                st.markdown(highlight(response,query), unsafe_allow_html=True)
+                st.markdown(highlight(response, query), unsafe_allow_html=True)
+
             else:
-                st.warning("No data found")
+                st.warning("Relevant answer not found.")
 
-    # ---------------- Chat ----------------
+    # ---------------- CHAT HISTORY ----------------
 
     st.subheader("💬 Conversation")
-    for role,msg in st.session_state.chat_history:
-        if role=="User":
+
+    for role, msg in st.session_state.chat_history:
+        if role == "User":
             st.markdown(f"**🧑 {msg}**")
         else:
             st.markdown(f"**🤖 {msg}**")
