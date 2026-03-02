@@ -1,209 +1,150 @@
 import streamlit as st
-import bcrypt
 import numpy as np
-import json
+import requests
 import re
-from sqlalchemy import create_engine, text
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import normalize
 
-# ------------------------------------------------
-# CONFIG
-# ------------------------------------------------
+# -----------------------------
+# PAGE CONFIG
+# -----------------------------
+st.set_page_config(page_title="AI RAG System", layout="wide")
+st.title("📄 AI RAG Project (Local + Fast)")
 
-st.set_page_config(page_title="AI PDF Stable Build", layout="wide")
-
-DATABASE_URL = st.secrets["DATABASE_URL"]
-
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_recycle=300
-)
-
-# ------------------------------------------------
-# DATABASE SETUP
-# ------------------------------------------------
-
-with engine.begin() as conn:
-    conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS users(
-        id SERIAL PRIMARY KEY,
-        email TEXT UNIQUE,
-        password TEXT
-    );
-    """))
-
-    conn.execute(text("""
-    CREATE TABLE IF NOT EXISTS documents(
-        id SERIAL PRIMARY KEY,
-        user_email TEXT,
-        file_name TEXT,
-        content TEXT,
-        embedding TEXT
-    );
-    """))
-
-# ------------------------------------------------
-# LOAD MODEL
-# ------------------------------------------------
-
+# -----------------------------
+# LOAD EMBEDDING MODEL
+# -----------------------------
 @st.cache_resource
 def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    return model
 
 model = load_model()
 
-# ------------------------------------------------
-# SESSION
-# ------------------------------------------------
+# -----------------------------
+# SESSION STORAGE
+# -----------------------------
+if "chunks" not in st.session_state:
+    st.session_state.chunks = []
 
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+if "embeddings" not in st.session_state:
+    st.session_state.embeddings = None
 
-# ------------------------------------------------
-# AUTH
-# ------------------------------------------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-if not st.session_state.logged_in:
+# -----------------------------
+# SMART CHUNKING
+# -----------------------------
+def create_chunks(text, chunk_size=800, overlap=150):
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += chunk_size - overlap
+    return chunks
 
-    st.title("Login")
+# -----------------------------
+# HIGHLIGHT FUNCTION
+# -----------------------------
+def highlight(text, query):
+    words = query.split()
+    for w in words:
+        text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
+    return text
 
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
+# -----------------------------
+# PDF UPLOAD
+# -----------------------------
+uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 
-    if st.button("Register"):
-        hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-        try:
-            with engine.begin() as conn:
-                conn.execute(
-                    text("INSERT INTO users(email,password) VALUES(:e,:p)"),
-                    {"e": email, "p": hashed}
-                )
-            st.success("Registered")
-        except:
-            st.error("User exists")
+if uploaded_file:
 
-    if st.button("Login"):
-        with engine.connect() as conn:
-            user = conn.execute(
-                text("SELECT password FROM users WHERE email=:e"),
-                {"e": email}
-            ).fetchone()
+    reader = PdfReader(uploaded_file)
+    text_content = ""
 
-        if user and bcrypt.checkpw(password.encode(), user[0].encode()):
-            st.session_state.logged_in = True
-            st.session_state.user_email = email
-            st.rerun()
-        else:
-            st.error("Invalid credentials")
+    for page in reader.pages:
+        extracted = page.extract_text()
+        if extracted:
+            text_content += extracted
 
-# ------------------------------------------------
-# MAIN APP
-# ------------------------------------------------
+    if not text_content.strip():
+        st.error("No readable text found in PDF.")
+    else:
+        st.success("PDF loaded successfully")
 
-else:
+        chunks = create_chunks(text_content)
+        embeddings = model.encode(chunks, batch_size=64)
+        embeddings = normalize(embeddings)
 
-    st.success(f"Logged in as {st.session_state.user_email}")
+        st.session_state.chunks = chunks
+        st.session_state.embeddings = embeddings
 
-    if st.button("Logout"):
-        st.session_state.logged_in = False
-        st.rerun()
+        st.success(f"{len(chunks)} chunks created & embedded")
 
-    # ---------------- UPLOAD ----------------
+# -----------------------------
+# SEARCH + AI ANSWER
+# -----------------------------
+st.divider()
+st.subheader("🔎 Ask Question")
 
-    st.header("Upload PDF")
+query = st.text_input("Enter your question")
 
-    uploaded = st.file_uploader("Choose PDF", type="pdf")
+if st.button("Ask AI") and query:
 
-    if uploaded:
+    if st.session_state.embeddings is None:
+        st.warning("No document indexed yet.")
+        st.stop()
 
-        reader = PdfReader(uploaded)
-        text_data = ""
+    query_embedding = model.encode([query])
+    query_embedding = normalize(query_embedding)
 
-        for page in reader.pages:
-            text_data += page.extract_text() or ""
+    similarities = np.dot(st.session_state.embeddings, query_embedding.T).flatten()
+    top_indices = similarities.argsort()[-3:][::-1]
 
-        st.write("Extracted length:", len(text_data))
+    context = "\n\n".join([st.session_state.chunks[i] for i in top_indices])
 
-        if len(text_data) < 100:
-            st.error("No readable text detected.")
-        else:
+    # -----------------------------
+    # OLLAMA CALL (TinyLlama)
+    # -----------------------------
+    response = requests.post(
+        "http://localhost:11434/api/generate",
+        json={
+            "model": "tinyllama",
+            "prompt": f"""
+Use the context below to answer clearly.
 
-            chunks = [text_data[i:i+700] for i in range(0, len(text_data), 600)]
+Context:
+{context}
 
-            if st.button("Index Now"):
+Question:
+{query}
 
-                embeddings = model.encode(chunks)
-                embeddings = normalize(embeddings)
+Answer clearly:
+""",
+            "stream": False
+        }
+    )
 
-                conn = engine.connect()
-                trans = conn.begin()
+    if response.status_code == 200:
+        answer = response.json()["response"]
 
-                try:
-                    for c, e in zip(chunks, embeddings):
-                        conn.execute(text("""
-                        INSERT INTO documents(user_email,file_name,content,embedding)
-                        VALUES(:u,:f,:c,:e)
-                        """), {
-                            "u": st.session_state.user_email,
-                            "f": uploaded.name,
-                            "c": c,
-                            "e": json.dumps(e.tolist())
-                        })
+        st.session_state.chat_history.append(("User", query))
+        st.session_state.chat_history.append(("AI", answer))
 
-                    trans.commit()
-                    st.success("Indexing finished")
+    else:
+        st.error("Ollama not responding.")
 
-                except Exception as err:
-                    trans.rollback()
-                    st.error(f"Insert error: {err}")
+# -----------------------------
+# CHAT DISPLAY
+# -----------------------------
+st.divider()
+st.subheader("💬 Conversation")
 
-                finally:
-                    conn.close()
-
-    # ---------------- VERIFY DATA ----------------
-
-    with engine.connect() as conn:
-        count = conn.execute(
-            text("SELECT COUNT(*) FROM documents WHERE user_email=:e"),
-            {"e": st.session_state.user_email}
-        ).scalar()
-
-    st.write("Stored chunks:", count)
-
-    # ---------------- SEARCH ----------------
-
-    st.header("Search")
-
-    query = st.text_input("Ask something")
-
-    if st.button("Search"):
-
-        if count == 0:
-            st.error("No documents indexed yet.")
-            st.stop()
-
-        q_emb = model.encode([query])
-        q_emb = normalize(q_emb)[0]
-
-        with engine.connect() as conn:
-            rows = conn.execute(
-                text("SELECT content, embedding FROM documents WHERE user_email=:e"),
-                {"e": st.session_state.user_email}
-            ).fetchall()
-
-        scored = []
-
-        for row in rows:
-            emb = np.array(json.loads(row[1]))
-            score = np.dot(q_emb, emb)
-            scored.append((score, row[0]))
-
-        scored = sorted(scored, reverse=True)[:3]
-
-        for s in scored:
-            st.write("Score:", round(s[0],3))
-            st.write(s[1])
-            st.write("---")
+for role, msg in st.session_state.chat_history:
+    if role == "User":
+        st.markdown(f"**🧑 You:** {msg}")
+    else:
+        st.markdown(f"**🤖 AI:** {msg}")
