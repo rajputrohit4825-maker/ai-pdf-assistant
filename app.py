@@ -3,40 +3,58 @@ import numpy as np
 import faiss
 import requests
 import os
-import re
 import pickle
 import json
 from PyPDF2 import PdfReader
-from sentence_transformers import SentenceTransformer
-from sklearn.preprocessing import normalize
+from sentence_transformers import SentenceTransformer, CrossEncoder
 
-# -----------------------------
+# =============================
 # CONFIG
-# -----------------------------
-st.set_page_config(page_title="AI RAG Pro", layout="wide")
-st.title("🚀 AI RAG Pro (Streaming + Citations + Multi PDF)")
+# =============================
+st.set_page_config(page_title="AI RAG Fast Pro", layout="wide")
+
+st.markdown("""
+<style>
+body { background-color:#0e1117; }
+.stButton>button {
+    border-radius:10px;
+    background:linear-gradient(90deg,#2563eb,#7c3aed);
+    color:white;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.title("🚀 AI RAG Fast Pro (CPU Optimized)")
 
 EMBEDDING_DIM = 384
 INDEX_FILE = "faiss_index.bin"
 META_FILE = "metadata.pkl"
 
-# -----------------------------
-# LOAD EMBEDDING MODEL
-# -----------------------------
+# =============================
+# LOAD MODELS
+# =============================
 @st.cache_resource
-def load_model():
+def load_embed_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
-model = load_model()
+@st.cache_resource
+def load_reranker():
+    return CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-# -----------------------------
+embed_model = load_embed_model()
+reranker = load_reranker()
+
+# =============================
 # SESSION INIT
-# -----------------------------
+# =============================
 if "index" not in st.session_state:
     if os.path.exists(INDEX_FILE):
         st.session_state.index = faiss.read_index(INDEX_FILE)
     else:
-        st.session_state.index = faiss.IndexFlatIP(EMBEDDING_DIM)
+        index = faiss.IndexHNSWFlat(EMBEDDING_DIM, 32)
+        index.hnsw.efSearch = 50
+        index.hnsw.efConstruction = 40
+        st.session_state.index = index
 
 if "metadata" not in st.session_state:
     if os.path.exists(META_FILE):
@@ -48,30 +66,46 @@ if "metadata" not in st.session_state:
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# -----------------------------
+# =============================
+# CACHE EMBEDDING
+# =============================
+@st.cache_data(show_spinner=False)
+def cached_embedding(text):
+    return embed_model.encode(
+        [text],
+        convert_to_numpy=True,
+        normalize_embeddings=True
+    )[0]
+
+# =============================
+# QUERY EXPANSION
+# =============================
+def expand_query(q, model):
+    prompt = f"Rewrite this question to improve retrieval:\n\n{q}\n\nImproved:"
+    try:
+        r = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model": model, "prompt": prompt, "stream": False}
+        )
+        return r.json().get("response", q).strip()
+    except:
+        return q
+
+# =============================
 # CHUNKING
-# -----------------------------
-def create_chunks(text, chunk_size=900, overlap=120):
+# =============================
+def create_chunks(text, size=900, overlap=120):
     chunks = []
     start = 0
     while start < len(text):
-        end = start + chunk_size
+        end = start + size
         chunks.append(text[start:end])
-        start += chunk_size - overlap
+        start += size - overlap
     return chunks
 
-# -----------------------------
-# HIGHLIGHT
-# -----------------------------
-def highlight(text, query):
-    words = query.split()
-    for w in words:
-        text = re.sub(f"(?i)({w})", r"<mark>\1</mark>", text)
-    return text
-
-# -----------------------------
+# =============================
 # PDF UPLOAD
-# -----------------------------
+# =============================
 uploaded_files = st.file_uploader(
     "Upload PDF(s)",
     type="pdf",
@@ -79,58 +113,85 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-
-    for uploaded_file in uploaded_files:
-
-        reader = PdfReader(uploaded_file)
+    for file in uploaded_files:
+        reader = PdfReader(file)
         text_content = ""
 
         for page in reader.pages:
-            extracted = page.extract_text()
-            if extracted:
-                text_content += extracted
+            t = page.extract_text()
+            if t:
+                text_content += t
 
         if not text_content.strip():
             continue
 
         chunks = create_chunks(text_content)
 
-        embeddings = model.encode(
+        embeddings = embed_model.encode(
             chunks,
-            batch_size=128,
-            show_progress_bar=False
-        )
-
-        embeddings = normalize(embeddings).astype("float32")
+            batch_size=256,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        ).astype("float32")
 
         st.session_state.index.add(embeddings)
 
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             st.session_state.metadata.append({
-                "file": uploaded_file.name,
+                "file": file.name,
+                "page": i+1,
                 "text": chunk
             })
 
     faiss.write_index(st.session_state.index, INDEX_FILE)
-
     with open(META_FILE, "wb") as f:
         pickle.dump(st.session_state.metadata, f)
 
-    st.success("PDF(s) indexed successfully")
+    st.success("Documents Indexed Successfully")
 
-# -----------------------------
-# MODEL SELECTION
-# -----------------------------
-st.sidebar.subheader("⚙ Model Settings")
+# =============================
+# AUTO SUMMARY
+# =============================
+if st.button("📄 Generate Document Summary"):
+    if not st.session_state.metadata:
+        st.warning("No documents available.")
+    else:
+        full_text = "\n".join(
+            [m["text"] for m in st.session_state.metadata[:20]]
+        )
+        prompt = f"Summarize clearly:\n\n{full_text}\n\nSummary:"
+        r = requests.post(
+            "http://localhost:11434/api/generate",
+            json={"model":"tinyllama","prompt":prompt,"stream":False}
+        )
+        summary = r.json().get("response","")
+        st.subheader("Document Summary")
+        st.write(summary)
 
+# =============================
+# SETTINGS
+# =============================
+st.sidebar.subheader("⚙ Settings")
 model_choice = st.sidebar.selectbox(
-    "Choose Local Model",
-    ["tinyllama", "mistral", "llama3"]
+    "Choose Model",
+    ["tinyllama","mistral","llama3"]
 )
 
-# -----------------------------
-# SEARCH + STREAMING AI
-# -----------------------------
+fast_mode = st.sidebar.toggle("⚡ Fast Mode (Skip Re-Rank)")
+reasoning_mode = st.sidebar.toggle("🧠 Advanced Reasoning")
+
+# =============================
+# DOCUMENT FILTER
+# =============================
+file_list = list(set([m["file"] for m in st.session_state.metadata]))
+selected_file = st.selectbox(
+    "Filter by Document",
+    ["All Documents"] + file_list
+)
+
+# =============================
+# ASK QUESTION
+# =============================
 st.divider()
 st.subheader("🔎 Ask Question")
 
@@ -142,25 +203,84 @@ if st.button("Ask AI") and query:
         st.warning("No documents indexed yet.")
         st.stop()
 
-    query_embedding = model.encode([query])
-    query_embedding = normalize(query_embedding).astype("float32")
+    expanded_query = expand_query(query, model_choice)
+    st.info(f"Expanded Query: {expanded_query}")
 
-    D, I = st.session_state.index.search(query_embedding, 3)
+    history_text = ""
+    for role,msg in st.session_state.chat_history[-4:]:
+        history_text += f"{role}: {msg}\n"
 
-    context_chunks = []
-    for idx in I[0]:
+    enhanced_query = history_text + expanded_query
+
+    q_vector = cached_embedding(enhanced_query)
+    q_embed = np.array([q_vector]).astype("float32")
+
+    D,I = st.session_state.index.search(q_embed,5)
+
+    scored = []
+
+    for pos, idx in enumerate(I[0]):
         if idx < len(st.session_state.metadata):
             meta = st.session_state.metadata[idx]
-            context_chunks.append(
-                f"[Source: {meta['file']}]\n{meta['text']}"
+
+            if selected_file != "All Documents":
+                if meta["file"] != selected_file:
+                    continue
+
+            keyword_score = sum(
+                1 for w in expanded_query.lower().split()
+                if w in meta["text"].lower()
             )
 
-    context = "\n\n".join(context_chunks)
+            vector_score = float(D[0][pos])
+            final_score = vector_score + (0.1*keyword_score)
 
-    prompt = f"""
-You are an intelligent assistant.
-Answer strictly using the provided context.
-If answer is not found in context, say "Not found in document."
+            scored.append((final_score, meta))
+
+    scored.sort(key=lambda x:x[0], reverse=True)
+    top_candidates = scored[:3]
+
+    if fast_mode:
+        top_results = top_candidates
+        confidence = round(float(top_results[0][0])*100,2)
+    else:
+        pairs = [(expanded_query, m["text"]) for _,m in top_candidates]
+        rerank_scores = reranker.predict(pairs)
+
+        reranked = []
+        for i,score in enumerate(rerank_scores):
+            reranked.append((score, top_candidates[i][1]))
+
+        reranked.sort(key=lambda x:x[0], reverse=True)
+        top_results = reranked
+        confidence = round(float(reranked[0][0])*100,2)
+
+    context_parts = []
+    for score,meta in top_results:
+        st.caption(f"Score: {round(score,3)} | {meta['file']} | Page {meta['page']}")
+        context_parts.append(
+            f"[Source: {meta['file']} | Page {meta['page']}]\n{meta['text']}"
+        )
+
+    context = "\n\n".join(context_parts)
+
+    if reasoning_mode:
+        prompt = f"""
+Think step by step internally.
+Answer clearly using only context.
+
+Context:
+{context}
+
+Question:
+{query}
+
+Final Answer:
+"""
+    else:
+        prompt = f"""
+Answer using only context.
+If not found say: Not found in document.
 
 Context:
 {context}
@@ -173,53 +293,69 @@ Answer:
 
     response = requests.post(
         "http://localhost:11434/api/generate",
-        json={
-            "model": model_choice,
-            "prompt": prompt,
-            "stream": True
-        },
+        json={"model":model_choice,"prompt":prompt,"stream":True},
         stream=True
     )
 
-    answer_container = st.empty()
-    full_response = ""
+    container = st.empty()
+    final_answer = ""
 
     for line in response.iter_lines():
         if line:
             chunk = json.loads(line.decode())
             if "response" in chunk:
-                full_response += chunk["response"]
-                answer_container.markdown(full_response)
+                final_answer += chunk["response"]
+                container.markdown(final_answer)
+
+    st.divider()
+    st.subheader("📊 Confidence Score")
+
+    if confidence > 70:
+        st.success(f"High Confidence: {confidence}%")
+    elif confidence > 40:
+        st.warning(f"Medium Confidence: {confidence}%")
+    else:
+        st.error(f"Low Confidence: {confidence}%")
 
     st.session_state.chat_history.append(("User", query))
-    st.session_state.chat_history.append(("AI", full_response))
+    st.session_state.chat_history.append(("AI", final_answer))
 
-# -----------------------------
+# =============================
 # CHAT DISPLAY
-# -----------------------------
+# =============================
 st.divider()
 st.subheader("💬 Conversation")
 
-for role, msg in st.session_state.chat_history:
-    if role == "User":
-        st.markdown(f"**🧑 You:** {msg}")
+for role,msg in st.session_state.chat_history:
+    if role=="User":
+        st.markdown(f"""
+        <div style='background:#1f2937;padding:10px;border-radius:8px;margin-bottom:8px'>
+        <b>🧑 You:</b><br>{msg}
+        </div>
+        """, unsafe_allow_html=True)
     else:
-        st.markdown(f"**🤖 AI:** {msg}")
+        st.markdown(f"""
+        <div style='background:#111827;padding:10px;border-radius:8px;margin-bottom:8px'>
+        <b>🤖 AI:</b><br>{msg}
+        </div>
+        """, unsafe_allow_html=True)
 
-# -----------------------------
-# RESET
-# -----------------------------
+# =============================
+# RESET SYSTEM
+# =============================
 st.sidebar.divider()
 
-if st.sidebar.button("Clear All Data"):
-    st.session_state.index = faiss.IndexFlatIP(EMBEDDING_DIM)
+if st.sidebar.button("Reset System"):
+    index = faiss.IndexHNSWFlat(EMBEDDING_DIM, 32)
+    index.hnsw.efSearch = 50
+    index.hnsw.efConstruction = 40
+    st.session_state.index = index
     st.session_state.metadata = []
     st.session_state.chat_history = []
 
     if os.path.exists(INDEX_FILE):
         os.remove(INDEX_FILE)
-
     if os.path.exists(META_FILE):
         os.remove(META_FILE)
 
-    st.sidebar.success("System Reset Done")
+    st.sidebar.success("System Reset Complete")
