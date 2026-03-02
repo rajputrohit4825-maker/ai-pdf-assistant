@@ -1,19 +1,26 @@
 import streamlit as st
 import numpy as np
+import faiss
 import requests
+import os
 import re
+import pickle
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import normalize
 
 # -----------------------------
-# PAGE CONFIG
+# CONFIG
 # -----------------------------
-st.set_page_config(page_title="AI RAG System", layout="wide")
-st.title("📄 AI RAG Project (Local + Fast)")
+st.set_page_config(page_title="AI RAG Pro", layout="wide")
+st.title("🚀 AI RAG Pro (Local + Multi PDF + FAISS)")
+
+EMBEDDING_DIM = 384
+INDEX_FILE = "faiss_index.bin"
+META_FILE = "metadata.pkl"
 
 # -----------------------------
-# LOAD EMBEDDING MODEL
+# LOAD MODEL (FAST)
 # -----------------------------
 @st.cache_resource
 def load_model():
@@ -23,21 +30,28 @@ def load_model():
 model = load_model()
 
 # -----------------------------
-# SESSION STORAGE
+# SESSION INIT
 # -----------------------------
-if "chunks" not in st.session_state:
-    st.session_state.chunks = []
+if "index" not in st.session_state:
+    if os.path.exists(INDEX_FILE):
+        st.session_state.index = faiss.read_index(INDEX_FILE)
+    else:
+        st.session_state.index = faiss.IndexFlatIP(EMBEDDING_DIM)
 
-if "embeddings" not in st.session_state:
-    st.session_state.embeddings = None
+if "metadata" not in st.session_state:
+    if os.path.exists(META_FILE):
+        with open(META_FILE, "rb") as f:
+            st.session_state.metadata = pickle.load(f)
+    else:
+        st.session_state.metadata = []
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
 # -----------------------------
-# SMART CHUNKING
+# CHUNKING
 # -----------------------------
-def create_chunks(text, chunk_size=800, overlap=150):
+def create_chunks(text, chunk_size=900, overlap=120):
     chunks = []
     start = 0
     while start < len(text):
@@ -47,7 +61,7 @@ def create_chunks(text, chunk_size=800, overlap=150):
     return chunks
 
 # -----------------------------
-# HIGHLIGHT FUNCTION
+# HIGHLIGHT
 # -----------------------------
 def highlight(text, query):
     words = query.split()
@@ -56,36 +70,67 @@ def highlight(text, query):
     return text
 
 # -----------------------------
-# PDF UPLOAD
+# PDF UPLOAD (MULTI)
 # -----------------------------
-uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+uploaded_files = st.file_uploader(
+    "Upload PDF(s)",
+    type="pdf",
+    accept_multiple_files=True
+)
 
-if uploaded_file:
+if uploaded_files:
 
-    reader = PdfReader(uploaded_file)
-    text_content = ""
+    for uploaded_file in uploaded_files:
 
-    for page in reader.pages:
-        extracted = page.extract_text()
-        if extracted:
-            text_content += extracted
+        reader = PdfReader(uploaded_file)
+        text_content = ""
 
-    if not text_content.strip():
-        st.error("No readable text found in PDF.")
-    else:
-        st.success("PDF loaded successfully")
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text_content += extracted
+
+        if not text_content.strip():
+            continue
 
         chunks = create_chunks(text_content)
-        embeddings = model.encode(chunks, batch_size=64)
-        embeddings = normalize(embeddings)
 
-        st.session_state.chunks = chunks
-        st.session_state.embeddings = embeddings
+        embeddings = model.encode(
+            chunks,
+            batch_size=128,
+            show_progress_bar=False
+        )
 
-        st.success(f"{len(chunks)} chunks created & embedded")
+        embeddings = normalize(embeddings).astype("float32")
+
+        st.session_state.index.add(embeddings)
+
+        for chunk in chunks:
+            st.session_state.metadata.append({
+                "file": uploaded_file.name,
+                "text": chunk
+            })
+
+    # Save index + metadata
+    faiss.write_index(st.session_state.index, INDEX_FILE)
+
+    with open(META_FILE, "wb") as f:
+        pickle.dump(st.session_state.metadata, f)
+
+    st.success("PDF(s) indexed successfully")
 
 # -----------------------------
-# SEARCH + AI ANSWER
+# MODEL SELECTION
+# -----------------------------
+st.sidebar.subheader("⚙ Model Settings")
+
+model_choice = st.sidebar.selectbox(
+    "Choose Local Model",
+    ["tinyllama", "mistral", "llama3"]
+)
+
+# -----------------------------
+# SEARCH + AI
 # -----------------------------
 st.divider()
 st.subheader("🔎 Ask Question")
@@ -94,27 +139,33 @@ query = st.text_input("Enter your question")
 
 if st.button("Ask AI") and query:
 
-    if st.session_state.embeddings is None:
-        st.warning("No document indexed yet.")
+    if st.session_state.index.ntotal == 0:
+        st.warning("No documents indexed yet.")
         st.stop()
 
     query_embedding = model.encode([query])
-    query_embedding = normalize(query_embedding)
+    query_embedding = normalize(query_embedding).astype("float32")
 
-    similarities = np.dot(st.session_state.embeddings, query_embedding.T).flatten()
-    top_indices = similarities.argsort()[-3:][::-1]
+    D, I = st.session_state.index.search(query_embedding, 3)
 
-    context = "\n\n".join([st.session_state.chunks[i] for i in top_indices])
+    context_chunks = []
+    for idx in I[0]:
+        if idx < len(st.session_state.metadata):
+            context_chunks.append(
+                st.session_state.metadata[idx]["text"]
+            )
+
+    context = "\n\n".join(context_chunks)
 
     # -----------------------------
-    # OLLAMA CALL (TinyLlama)
+    # OLLAMA CALL
     # -----------------------------
     response = requests.post(
         "http://localhost:11434/api/generate",
         json={
-            "model": "tinyllama",
+            "model": model_choice,
             "prompt": f"""
-Use the context below to answer clearly.
+Use the context below to answer clearly and accurately.
 
 Context:
 {context}
@@ -135,7 +186,7 @@ Answer clearly:
         st.session_state.chat_history.append(("AI", answer))
 
     else:
-        st.error("Ollama not responding.")
+        st.error("Ollama not responding. Make sure it's running.")
 
 # -----------------------------
 # CHAT DISPLAY
@@ -148,3 +199,21 @@ for role, msg in st.session_state.chat_history:
         st.markdown(f"**🧑 You:** {msg}")
     else:
         st.markdown(f"**🤖 AI:** {msg}")
+
+# -----------------------------
+# RESET SYSTEM
+# -----------------------------
+st.sidebar.divider()
+
+if st.sidebar.button("Clear All Data"):
+    st.session_state.index = faiss.IndexFlatIP(EMBEDDING_DIM)
+    st.session_state.metadata = []
+    st.session_state.chat_history = []
+
+    if os.path.exists(INDEX_FILE):
+        os.remove(INDEX_FILE)
+
+    if os.path.exists(META_FILE):
+        os.remove(META_FILE)
+
+    st.sidebar.success("System Reset Done")
