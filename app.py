@@ -5,6 +5,7 @@ import requests
 import os
 import re
 import pickle
+import json
 from PyPDF2 import PdfReader
 from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import normalize
@@ -13,19 +14,18 @@ from sklearn.preprocessing import normalize
 # CONFIG
 # -----------------------------
 st.set_page_config(page_title="AI RAG Pro", layout="wide")
-st.title("🚀 AI RAG Pro (Local + Multi PDF + FAISS)")
+st.title("🚀 AI RAG Pro (Streaming + Citations + Multi PDF)")
 
 EMBEDDING_DIM = 384
 INDEX_FILE = "faiss_index.bin"
 META_FILE = "metadata.pkl"
 
 # -----------------------------
-# LOAD MODEL (FAST)
+# LOAD EMBEDDING MODEL
 # -----------------------------
 @st.cache_resource
 def load_model():
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    return model
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
 model = load_model()
 
@@ -70,7 +70,7 @@ def highlight(text, query):
     return text
 
 # -----------------------------
-# PDF UPLOAD (MULTI)
+# PDF UPLOAD
 # -----------------------------
 uploaded_files = st.file_uploader(
     "Upload PDF(s)",
@@ -111,7 +111,6 @@ if uploaded_files:
                 "text": chunk
             })
 
-    # Save index + metadata
     faiss.write_index(st.session_state.index, INDEX_FILE)
 
     with open(META_FILE, "wb") as f:
@@ -130,7 +129,7 @@ model_choice = st.sidebar.selectbox(
 )
 
 # -----------------------------
-# SEARCH + AI
+# SEARCH + STREAMING AI
 # -----------------------------
 st.divider()
 st.subheader("🔎 Ask Question")
@@ -151,21 +150,17 @@ if st.button("Ask AI") and query:
     context_chunks = []
     for idx in I[0]:
         if idx < len(st.session_state.metadata):
+            meta = st.session_state.metadata[idx]
             context_chunks.append(
-                st.session_state.metadata[idx]["text"]
+                f"[Source: {meta['file']}]\n{meta['text']}"
             )
 
     context = "\n\n".join(context_chunks)
 
-    # -----------------------------
-    # OLLAMA CALL
-    # -----------------------------
-    response = requests.post(
-        "http://localhost:11434/api/generate",
-        json={
-            "model": model_choice,
-            "prompt": f"""
-Use the context below to answer clearly and accurately.
+    prompt = f"""
+You are an intelligent assistant.
+Answer strictly using the provided context.
+If answer is not found in context, say "Not found in document."
 
 Context:
 {context}
@@ -173,20 +168,31 @@ Context:
 Question:
 {query}
 
-Answer clearly:
-""",
-            "stream": False
-        }
+Answer:
+"""
+
+    response = requests.post(
+        "http://localhost:11434/api/generate",
+        json={
+            "model": model_choice,
+            "prompt": prompt,
+            "stream": True
+        },
+        stream=True
     )
 
-    if response.status_code == 200:
-        answer = response.json()["response"]
+    answer_container = st.empty()
+    full_response = ""
 
-        st.session_state.chat_history.append(("User", query))
-        st.session_state.chat_history.append(("AI", answer))
+    for line in response.iter_lines():
+        if line:
+            chunk = json.loads(line.decode())
+            if "response" in chunk:
+                full_response += chunk["response"]
+                answer_container.markdown(full_response)
 
-    else:
-        st.error("Ollama not responding. Make sure it's running.")
+    st.session_state.chat_history.append(("User", query))
+    st.session_state.chat_history.append(("AI", full_response))
 
 # -----------------------------
 # CHAT DISPLAY
@@ -201,7 +207,7 @@ for role, msg in st.session_state.chat_history:
         st.markdown(f"**🤖 AI:** {msg}")
 
 # -----------------------------
-# RESET SYSTEM
+# RESET
 # -----------------------------
 st.sidebar.divider()
 
